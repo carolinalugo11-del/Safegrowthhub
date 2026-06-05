@@ -1,1 +1,1 @@
-worker: python bot_lector.py
+worker: python3 bot_lector.py
