@@ -1,0 +1,3012 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Safe Growth Hub</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=Nunito:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+<!-- Firebase SDK -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script>
+  // ══════════════════════════════════
+  // FIREBASE - safe-growth-hub-6bd5d
+  // ══════════════════════════════════
+  firebase.initializeApp({
+    apiKey: "AIzaSyClxZyC-yi2rvqNKctDrdcY4oVQyKH4pFg",
+    authDomain: "safe-growth-hub-6bd5d.firebaseapp.com",
+    projectId: "safe-growth-hub-6bd5d",
+    storageBucket: "safe-growth-hub-6bd5d.firebasestorage.app",
+    messagingSenderId: "674058236380",
+    appId: "1:674058236380:web:c881cf7deeefcdfd05df19"
+  });
+
+  const _fs = firebase.firestore();
+  const _DOC = _fs.collection("sgh").doc("maindb");
+
+  window._isSaving = false;
+  window._saveQueue = Promise.resolve();
+  window._firebaseReady = false;
+
+  const _COLS = ['users','transactions','investments','botOps','stockPositions','noticias','ganancias','trades','supportMsgs','pnlDiario'];
+
+  // ── GUARDAR en Firebase ──
+  // Firebase es la ÚNICA fuente de verdad.
+  // Antes de guardar: trae lo último de Firebase, mezcla (Firebase gana en todo excepto en
+  // registros que el local tiene y Firebase no) y luego escribe. Serializado con una cola
+  // para que dos guardados simultáneos no se pisen.
+  window._firebaseSave = function(localData) {
+    window._saveQueue = window._saveQueue.then(async () => {
+      window._isSaving = true;
+      try {
+        const d = document.getElementById('syncDot');
+        if(d){ d.className='sync-dot saving'; d.title='Guardando...'; }
+      } catch(e){}
+
+      try {
+        // 1) Traer el estado más reciente de Firebase
+        const snap = await _DOC.get();
+        let merged = JSON.parse(JSON.stringify(localData)); // copia para no mutar el original
+
+        if (snap.exists) {
+          const remote = snap.data()?.db;
+          if (remote) {
+            // Firebase gana: empezamos desde Firebase y agregamos solo lo que local tiene
+            // y Firebase NO tiene (evita que datos borrados en Firebase vuelvan a aparecer,
+            // pero sí sube registros nuevos que solo existen en este dispositivo).
+            _COLS.forEach(k => {
+              const rList = remote[k] || [];
+              const lList = localData[k] || [];
+              // Copiar lista remota (fuente de verdad)
+              const resultado = rList.filter(r => {
+                const localVersion = lList.find(l => l.id === r.id);
+                return !(localVersion && (localVersion._deleted || localVersion.status === 'deleted'));
+              });
+              // Agregar registros que solo existen en local y no en Firebase (creados en este dispositivo ahora)
+              lList.forEach(li => {
+                if (li.id && !rList.find(ri => ri.id === li.id)) resultado.push(li);
+              });
+              merged[k] = resultado;
+            });
+            // Config: Firebase gana si tiene PIN válido
+            if (remote.config && remote.config.adminPin && remote.config.adminPin !== '000000') {
+              merged.config = remote.config;
+            }
+            // stockCatalog: el más completo gana
+            if ((remote.stockCatalog||[]).length > (merged.stockCatalog||[]).length) {
+              merged.stockCatalog = remote.stockCatalog;
+            }
+          }
+        }
+
+        // 2) Escribir a Firebase y actualizar localStorage con el resultado final
+        await _DOC.set({ db: merged });
+        try { localStorage.setItem('sgh_v11', JSON.stringify(merged)); } catch(e){}
+        try {
+          const d = document.getElementById('syncDot');
+          if(d){ d.className='sync-dot ok'; d.title='Sincronizado ✅'; }
+        } catch(e){}
+      } catch(e) {
+        console.warn('Firebase save error:', e);
+        try {
+          const d = document.getElementById('syncDot');
+          if(d){ d.className='sync-dot'; d.title='Error al guardar ⚠️'; }
+        } catch(e2){}
+      }
+
+      // Liberar el flag SOLO al terminar, no con timeout
+      window._isSaving = false;
+    });
+    return window._saveQueue;
+  };
+
+  // ── ESCUCHAR cambios remotos (bot, admin desde otro dispositivo) ──
+  // Firebase es la fuente de verdad: cuando llega un snapshot, simplemente
+  // lo guardamos en localStorage y re-renderizamos. NO mezclamos local sobre remoto.
+  // Esto garantiza que lo que ve el admin = lo que ve el usuario.
+  _DOC.onSnapshot(snap => {
+    if (!snap.exists) return;
+    // No procesar mientras estamos en medio de un guardado (evita loop)
+    if (window._isSaving) return;
+
+    const remote = snap.data()?.db;
+    if (!remote) return;
+
+    // Reemplazar localStorage con lo que dice Firebase (fuente de verdad)
+    try { localStorage.setItem('sgh_v11', JSON.stringify(remote)); } catch(e){}
+
+    // Re-renderizar si hay sesión activa
+    if (window._SGH_UID) {
+      try { window._SGH_render && window._SGH_render(); } catch(e){}
+      try { window._SGH_renderAdmin && window._SGH_renderAdmin(); } catch(e){}
+      try { if(typeof updateV9Stats==='function') updateV9Stats(); } catch(e){}
+    }
+  }, err => console.warn('Snapshot error:', err));
+
+  // ── CARGA INICIAL ──
+  // Al arrancar, Firebase manda lo definitivo. Lo guardamos y listo.
+  (async () => {
+    try {
+      const snap = await _DOC.get();
+      if (snap.exists) {
+        const remote = snap.data()?.db;
+        if (remote) {
+          // Firebase gana sobre cualquier dato local al arrancar
+          try { localStorage.setItem('sgh_v11', JSON.stringify(remote)); } catch(e){}
+        }
+      }
+    } catch(e) { console.warn('Init error:', e); }
+    window._firebaseReady = true;
+    if (window._onFirebaseReady) window._onFirebaseReady();
+  })();
+</script>
+<style>
+:root{
+  --bg:#06100e;--s1:#091a16;--card:#0d2019;--card2:#102418;
+  --gold:#d4a843;--gold2:#f5cb5c;--goldd:rgba(212,168,67,0.14);
+  --green:#2ecc71;--greend:rgba(46,204,113,0.12);
+  --red:#e74c3c;--redd:rgba(231,76,60,0.12);
+  --blue:#3498db;--blued:rgba(52,152,219,0.12);
+  --purple:#9b59b6;--purpled:rgba(155,89,182,0.12);
+  --text:#e4f0ea;--muted:#5a8070;--border:rgba(212,168,67,0.16);
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+body{background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;font-family:'Nunito',sans-serif;}
+.scr{display:none;min-height:100vh;flex-direction:column;}.scr.on{display:flex;}
+#sLogin{background:radial-gradient(ellipse at 50% 15%,#0e2e20,var(--bg) 65%);align-items:center;justify-content:center;padding:2rem 1.4rem;gap:1.5rem;}
+.logo{text-align:center;}
+.logo-icon{width:88px;height:88px;margin:0 auto 0.85rem;background:linear-gradient(145deg,#0d2e1e,#061409);border:1.5px solid var(--gold);border-radius:22px;display:flex;align-items:center;justify-content:center;animation:glow 3s ease-in-out infinite,float 4s ease-in-out infinite;cursor:pointer;user-select:none;position:relative;overflow:visible;}
+@keyframes glow{0%,100%{box-shadow:0 0 25px rgba(46,204,113,0.25),0 0 50px rgba(212,168,67,0.15);}50%{box-shadow:0 0 55px rgba(46,204,113,0.5),0 0 80px rgba(212,168,67,0.3);}}
+@keyframes float{0%,100%{transform:translateY(0px);}50%{transform:translateY(-5px);}}
+@keyframes chartRise{0%{stroke-dashoffset:120;}100%{stroke-dashoffset:0;}}
+@keyframes sparkle{0%,100%{opacity:0;transform:scale(0);}50%{opacity:1;transform:scale(1);}}
+@keyframes pulse2{0%,100%{opacity:0.4;}50%{opacity:1;}}
+.logo h1{font-family:'Playfair Display',serif;font-size:1.9rem;font-weight:900;background:linear-gradient(135deg,var(--gold),var(--gold2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.logo p{font-size:0.71rem;color:var(--muted);letter-spacing:0.18em;text-transform:uppercase;margin-top:0.2rem;}
+.card{background:var(--card);border:1px solid var(--border);border-radius:22px;padding:1.8rem 1.6rem;width:100%;max-width:380px;box-shadow:0 20px 60px rgba(0,0,0,0.5);}
+.card h2{font-family:'Playfair Display',serif;font-size:1.3rem;color:var(--gold);margin-bottom:1.2rem;}
+.fld{margin-bottom:0.9rem;}
+.fld label{display:block;font-size:0.68rem;color:var(--muted);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:0.4rem;}
+.fld input,.fld select,.fld textarea{width:100%;padding:0.75rem 0.9rem;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:12px;color:var(--text);font-size:0.88rem;font-family:'Nunito',sans-serif;outline:none;transition:border-color .2s;-webkit-appearance:none;resize:none;}
+.fld input:focus,.fld select:focus,.fld textarea:focus{border-color:var(--gold);}
+.btn{width:100%;padding:0.88rem;background:linear-gradient(135deg,var(--gold),#8a6518);border:none;border-radius:12px;color:#06100e;font-size:0.88rem;font-weight:800;cursor:pointer;letter-spacing:0.04em;text-transform:uppercase;transition:opacity .2s,transform .15s;margin-top:0.4rem;font-family:'Nunito',sans-serif;}
+.btn:active{transform:scale(0.97);opacity:0.88;}
+.btn.red{background:linear-gradient(135deg,#c0392b,#7b2414);color:#fff;}
+.btn.blue{background:linear-gradient(135deg,#2980b9,#1a5276);color:#fff;}
+.btn.green{background:linear-gradient(135deg,#27ae60,#1a6e3c);color:#fff;}
+.btn.purple{background:linear-gradient(135deg,#8e44ad,#5b2c6f);color:#fff;}
+.btn.sm{padding:0.5rem;font-size:0.74rem;margin-top:0;}
+.btn.ghost{background:none;border:1px solid var(--border);color:var(--muted);margin-top:0.5rem;}
+.link-row{text-align:center;margin-top:0.8rem;font-size:0.8rem;color:var(--muted);}
+.link-row a{color:var(--gold);text-decoration:none;font-weight:700;cursor:pointer;}
+.errmsg{background:rgba(231,76,60,0.14);border:1px solid rgba(231,76,60,0.32);border-radius:10px;padding:0.6rem 0.85rem;font-size:0.78rem;color:#ff9080;margin-bottom:0.8rem;display:none;}
+.okmsg{background:var(--greend);border:1px solid rgba(46,204,113,0.28);border-radius:10px;padding:0.6rem 0.85rem;font-size:0.78rem;color:#7fffa8;margin-bottom:0.8rem;display:none;}
+.ref-badge{background:var(--goldd);border:1px solid rgba(212,168,67,0.25);border-radius:10px;padding:0.45rem 0.8rem;font-size:0.73rem;color:var(--gold2);margin-bottom:0.8rem;text-align:center;}
+.hdr{padding:0.75rem 1rem 0;display:flex;align-items:center;justify-content:space-between;}
+.hdr-brand{font-family:'Playfair Display',serif;font-size:0.95rem;font-weight:700;background:linear-gradient(135deg,var(--gold),var(--gold2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.hdr-time{font-size:0.62rem;color:var(--muted);}
+.sync-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--muted);margin-left:4px;vertical-align:middle;}
+.sync-dot.ok{background:var(--green);}
+.sync-dot.saving{background:var(--gold);animation:pulse 0.8s ease-in-out infinite;}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.3;}}
+.btnout{background:none;border:1px solid var(--border);border-radius:8px;color:var(--muted);font-size:0.63rem;padding:0.26rem 0.48rem;cursor:pointer;font-family:'Nunito',sans-serif;}
+.frase-card{margin:0.55rem 0.95rem 0;background:linear-gradient(135deg,rgba(212,168,67,0.07),rgba(46,204,113,0.05));border:1px solid rgba(212,168,67,0.18);border-radius:13px;padding:0.6rem 0.9rem;display:flex;align-items:center;gap:0.5rem;}
+.frase-txt{font-size:0.72rem;color:var(--gold2);font-style:italic;line-height:1.4;}
+.crypto-ticker{margin:0.55rem 0.95rem 0;display:flex;gap:0.35rem;overflow-x:auto;padding-bottom:0.1rem;}
+.crypto-ticker::-webkit-scrollbar{display:none;}
+.ct{flex:0 0 auto;background:var(--card);border:1px solid var(--border);border-radius:11px;padding:0.48rem 0.52rem;text-align:center;min-width:65px;}
+.ct-sym{font-size:0.53rem;color:var(--muted);text-transform:uppercase;}
+.ct-price{font-size:0.78rem;font-weight:800;color:var(--text);margin:0.05rem 0;}
+.ct-chg{font-size:0.58rem;font-weight:800;}
+.ct-chg.up{color:var(--green);}.ct-chg.dn{color:var(--red);}
+.res-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.42rem;padding:0 0.95rem;margin:0.52rem 0;}
+.res-card{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:0.72rem;}
+.res-ic{font-size:0.92rem;margin-bottom:0.16rem;}
+.res-lbl{font-size:0.56rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;}
+.res-val{font-size:0.92rem;font-weight:800;margin-top:0.05rem;}
+.gc{color:var(--green);}.go{color:var(--gold);}.gr{color:var(--red);}
+/* BOT LIVE */
+.bot-live{margin:0 0.95rem 0.52rem;background:var(--card);border:1px solid var(--border);border-radius:15px;overflow:hidden;}
+.blh{background:linear-gradient(135deg,rgba(52,152,219,0.15),rgba(46,204,113,0.08));padding:0.55rem 0.88rem;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);}
+.blt{font-size:0.6rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.07em;}
+.blp{font-size:0.83rem;font-weight:800;color:var(--blue);}
+.bls{font-size:0.58rem;font-weight:800;padding:0.14rem 0.42rem;border-radius:20px;}
+.bls.on{background:var(--greend);color:var(--green);}.bls.off{background:var(--redd);color:var(--red);}
+.blb{padding:0.65rem 0.88rem;}
+.op-card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:0.55rem 0.7rem;margin-bottom:0.35rem;}
+.op-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem;}
+.op-strat{font-size:0.65rem;font-weight:800;color:var(--blue);}
+.op-st{font-size:0.56rem;padding:0.1rem 0.38rem;border-radius:20px;font-weight:700;}
+.op-st.open{background:var(--greend);color:var(--green);}.op-st.closed{background:var(--goldd);color:var(--gold);}.op-st.blocked{background:var(--redd);color:var(--red);}
+.op-grid3{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.25rem;}
+.op-it{text-align:center;}
+.op-il{font-size:0.5rem;color:var(--muted);text-transform:uppercase;}
+.op-iv{font-size:0.72rem;font-weight:800;margin-top:0.03rem;}
+.pnl-box{background:var(--greend);border:1px solid rgba(46,204,113,0.2);border-radius:9px;padding:0.42rem 0.65rem;display:flex;justify-content:space-between;align-items:center;margin-top:0.42rem;}
+.pnl-lbl{font-size:0.6rem;color:var(--muted);}
+.pnl-val{font-size:0.92rem;font-weight:800;color:var(--green);}
+/* REF CARD */
+.ref-card{margin:0 0.95rem 0.52rem;background:var(--card);border:1px solid var(--border);border-radius:13px;padding:0.75rem;}
+.ref-link{background:rgba(255,255,255,0.04);border:1px dashed rgba(212,168,67,0.3);border-radius:9px;padding:0.42rem 0.65rem;font-size:0.65rem;color:var(--gold2);word-break:break-all;font-family:monospace;margin-bottom:0.52rem;}
+/* SEC */
+.sec{padding:0 0.95rem;margin-bottom:0.85rem;}
+.sec-ttl{font-family:'Playfair Display',serif;font-size:0.9rem;color:var(--gold);margin-bottom:0.52rem;display:flex;align-items:center;gap:0.35rem;}
+.sec-ttl::after{content:'';flex:1;height:1px;background:var(--border);}
+/* TXN */
+.txn{display:flex;align-items:center;gap:0.55rem;padding:0.55rem 0;border-bottom:1px solid rgba(255,255,255,0.04);}
+.txn:last-child{border-bottom:none;}
+.txn-ic{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:0.82rem;flex-shrink:0;}
+.txn-ic.d{background:var(--greend);}.txn-ic.r{background:var(--redd);}.txn-ic.g{background:var(--goldd);}
+.txn-desc{flex:1;font-size:0.72rem;}
+.txn-date{font-size:0.58rem;color:var(--muted);margin-top:0.03rem;}
+.txn-amt{font-size:0.78rem;font-weight:800;}
+.txn-amt.d{color:var(--green);}.txn-amt.r{color:var(--red);}.txn-amt.g{color:var(--gold);}
+/* WALLET */
+.wallet-box{background:var(--card2);border:1px solid var(--border);border-radius:13px;padding:0.85rem;margin-bottom:0.8rem;}
+.wallet-addr{font-size:0.7rem;color:var(--gold2);word-break:break-all;margin-bottom:0.6rem;line-height:1.5;font-family:monospace;}
+.wallet-network{display:inline-block;background:rgba(212,168,67,0.14);border:1px solid rgba(212,168,67,0.3);border-radius:6px;padding:0.14rem 0.45rem;font-size:0.58rem;color:var(--gold);font-weight:700;margin-bottom:0.6rem;}
+.copy-btn{display:flex;align-items:center;justify-content:center;gap:0.3rem;width:100%;padding:0.52rem;background:var(--goldd);border:1px solid rgba(212,168,67,0.25);border-radius:9px;color:var(--gold);font-size:0.7rem;font-weight:700;cursor:pointer;font-family:'Nunito',sans-serif;}
+.steps{display:flex;flex-direction:column;gap:0.35rem;margin-bottom:0.75rem;}
+.step{display:flex;align-items:flex-start;gap:0.42rem;background:rgba(255,255,255,0.03);border-radius:9px;padding:0.52rem 0.65rem;}
+.step-n{width:17px;height:17px;border-radius:50%;background:var(--gold);color:#06100e;font-size:0.62rem;font-weight:900;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.step-t{font-size:0.7rem;line-height:1.4;}
+/* RET TABS */
+.ret-tabs{display:flex;gap:0.35rem;margin-bottom:0.75rem;flex-wrap:wrap;}
+.rtab{flex:1;min-width:65px;padding:0.48rem;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:9px;font-size:0.64rem;font-weight:700;color:var(--muted);cursor:pointer;text-align:center;font-family:'Nunito',sans-serif;}
+.rtab.on{background:var(--goldd);border-color:rgba(212,168,67,0.35);color:var(--gold);}
+.ret-method{display:none;}.ret-method.on{display:block;}
+.cambio-box{background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:9px;padding:0.52rem 0.7rem;margin-bottom:0.75rem;}
+.cambio-row{display:flex;justify-content:space-between;font-size:0.7rem;margin-bottom:0.2rem;}
+.cambio-row:last-child{margin-bottom:0;}
+.cambio-lbl{color:var(--muted);}.cambio-val{color:var(--gold2);font-weight:700;}
+/* MODAL */
+.mover{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,0.75);backdrop-filter:blur(5px);align-items:flex-end;justify-content:center;}
+.mover.on{display:flex;}
+.modal{background:var(--card);border-top:1px solid var(--border);border-radius:24px 24px 0 0;width:100%;max-width:480px;padding:1.1rem 1.25rem 3rem;position:relative;max-height:90vh;overflow-y:auto;animation:sup .32s ease;}
+.m-handle{width:36px;height:4px;background:var(--border);border-radius:2px;margin:0 auto 0.9rem;}
+.m-ttl{font-family:'Playfair Display',serif;font-size:1.1rem;color:var(--gold);margin-bottom:0.75rem;}
+.m-close{position:absolute;top:0.9rem;right:1rem;background:none;border:none;color:var(--muted);font-size:1rem;cursor:pointer;}
+.info-b{background:var(--goldd);border:1px solid rgba(212,168,67,0.22);border-radius:10px;padding:0.62rem 0.78rem;font-size:0.72rem;color:var(--gold2);margin-bottom:0.75rem;line-height:1.5;}
+.info-b.green{background:var(--greend);border-color:rgba(46,204,113,0.22);color:#7fffa8;}
+.info-b.red{background:var(--redd);border-color:rgba(231,76,60,0.22);color:#ff9080;}
+.info-b.blue{background:var(--blued);border-color:rgba(52,152,219,0.22);color:#90caff;}
+.info-b.purple{background:var(--purpled);border-color:rgba(155,89,182,0.22);color:#d7a8f0;}
+/* ADMIN */
+.admin-tabs{display:flex;gap:0.28rem;margin-bottom:0.85rem;flex-wrap:wrap;}
+.atab{flex:1;min-width:38px;padding:0.4rem 0.12rem;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:8px;font-size:0.58rem;font-weight:700;color:var(--muted);cursor:pointer;text-align:center;font-family:'Nunito',sans-serif;}
+.atab.on{background:var(--goldd);border-color:rgba(212,168,67,0.35);color:var(--gold);}
+.admin-stat{background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:0.65rem;margin-bottom:0.42rem;display:flex;justify-content:space-between;align-items:center;}
+.admin-stat-lbl{font-size:0.65rem;color:var(--muted);}
+.admin-stat-val{font-size:0.92rem;font-weight:800;color:var(--gold);}
+/* BNAV */
+.bnav{position:fixed;bottom:0;left:0;right:0;background:var(--s1);border-top:1px solid var(--border);display:flex;padding:0.42rem 0 calc(env(safe-area-inset-bottom,0px) + 0.42rem);z-index:100;}
+.ni{flex:1;display:flex;flex-direction:column;align-items:center;gap:0.1rem;cursor:pointer;padding:0.14rem 0;}
+.ni-i{font-size:1rem;}
+.ni-l{font-size:0.48rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);}
+.ni.on .ni-l{color:var(--gold);}
+.ni.on .ni-i{filter:drop-shadow(0 0 5px var(--gold));}
+.tab{display:none;}.tab.on{display:block;}
+.content{padding-bottom:5.5rem;}
+.empty{text-align:center;color:var(--muted);padding:1.2rem 1rem;font-size:0.78rem;}
+.badge{display:inline-block;padding:0.12rem 0.42rem;border-radius:20px;font-size:0.58rem;font-weight:800;}
+.badge.pending{background:rgba(212,168,67,0.15);color:var(--gold);}
+.badge.done{background:var(--greend);color:var(--green);}
+.badge.proc{background:var(--blued);color:var(--blue);}
+.badge.blocked{background:var(--redd);color:var(--red);}
+.divider{height:1px;background:var(--border);margin:0.62rem 0;}
+.live-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;margin-right:4px;box-shadow:0 0 6px var(--green);animation:pulse2 1.5s infinite;}
+@keyframes pulse2{0%,100%{opacity:1;}50%{opacity:0.3;}}
+@keyframes sup{from{transform:translateY(100%)}to{transform:translateY(0)}}
+/* NOSOTROS */
+.nos-hero{background:linear-gradient(135deg,#0e2a1c,#091a12);margin:0 0.95rem;border-radius:15px;padding:1.1rem 0.95rem;text-align:center;border:1px solid var(--border);margin-top:0.55rem;}
+.nos-ttl{font-family:'Playfair Display',serif;font-size:1.2rem;color:var(--gold2);margin-bottom:0.35rem;}
+.nos-sub{font-size:0.73rem;color:var(--muted);line-height:1.6;}
+.nos-block{margin:0 0.95rem;margin-top:0.52rem;background:var(--card);border:1px solid var(--border);border-radius:13px;padding:0.85rem;}
+.nos-block-ttl{font-size:0.83rem;font-weight:800;color:var(--gold);margin-bottom:0.35rem;}
+.nos-block-txt{font-size:0.73rem;color:var(--muted);line-height:1.7;}
+.nos-block-txt strong{color:var(--text);}
+/* INFO */
+.info-sec{margin:0 0.95rem;margin-top:0.52rem;background:var(--card);border:1px solid var(--border);border-radius:13px;overflow:hidden;}
+.info-sec-hdr{padding:0.65rem 0.85rem;background:linear-gradient(135deg,rgba(212,168,67,0.1),transparent);border-bottom:1px solid var(--border);cursor:pointer;display:flex;justify-content:space-between;align-items:center;}
+.info-sec-hdr-txt{font-size:0.8rem;font-weight:800;color:var(--gold);}
+.info-sec-body{padding:0.75rem 0.85rem;display:none;}
+.info-sec-body.on{display:block;}
+.info-sec-body p{font-size:0.72rem;color:var(--muted);line-height:1.7;margin-bottom:0.52rem;}
+.info-sec-body p:last-child{margin-bottom:0;}
+.info-sec-body strong{color:var(--text);}
+.semaforo{display:flex;flex-direction:column;gap:0.38rem;margin:0.48rem 0;}
+.sem-item{border-radius:10px;padding:0.52rem 0.7rem;font-size:0.71rem;line-height:1.5;}
+.sem-item.green{background:var(--greend);border:1px solid rgba(46,204,113,0.2);}
+.sem-item.yellow{background:rgba(241,196,15,0.1);border:1px solid rgba(241,196,15,0.2);}
+.sem-item.red{background:var(--redd);border:1px solid rgba(231,76,60,0.2);}
+.modelo-50{display:grid;grid-template-columns:1fr 1fr;gap:0.48rem;margin:0.48rem 0;}
+.modelo-col{background:rgba(255,255,255,0.03);border-radius:10px;padding:0.62rem;text-align:center;}
+.modelo-pct{font-family:'Playfair Display',serif;font-size:1.5rem;font-weight:900;}
+.modelo-desc{font-size:0.63rem;color:var(--muted);margin-top:0.12rem;line-height:1.4;}
+/* ACCIONES */
+.acc-mkt-card{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:0.78rem;margin-bottom:0.42rem;}
+.acc-hdr{display:flex;align-items:center;gap:0.55rem;margin-bottom:0.32rem;}
+.acc-logo{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:1.1rem;flex-shrink:0;}
+.acc-name{font-size:0.83rem;font-weight:800;}
+.acc-ticker{font-size:0.6rem;color:var(--muted);}
+.acc-price-row{display:flex;align-items:center;gap:0.42rem;text-align:right;}
+.acc-price{font-size:0.92rem;font-weight:800;color:var(--gold2);}
+.acc-chg{font-size:0.62rem;font-weight:800;padding:0.1rem 0.38rem;border-radius:6px;}
+.acc-chg.up{background:var(--greend);color:var(--green);}
+.acc-chg.dn{background:var(--redd);color:var(--red);}
+.acc-desc{font-size:0.7rem;color:var(--muted);line-height:1.58;margin-bottom:0.38rem;}
+.acc-div-info{font-size:0.63rem;color:var(--gold);margin-bottom:0.32rem;font-weight:700;}
+/* PORTAFOLIO */
+.port-card{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:0.78rem;margin-bottom:0.42rem;}
+.port-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.45rem;}
+.port-g{display:grid;grid-template-columns:1fr 1fr;gap:0.38rem;margin-bottom:0.4rem;}
+.port-item{background:rgba(255,255,255,0.03);border-radius:8px;padding:0.38rem 0.5rem;}
+.port-lbl{font-size:0.54rem;color:var(--muted);text-transform:uppercase;}
+.port-val{font-size:0.78rem;font-weight:800;margin-top:0.03rem;}
+.port-pl{display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);border-radius:8px;padding:0.38rem 0.5rem;margin-bottom:0.38rem;}
+/* PLANES */
+.plan-btn{background:var(--card2);border:1.5px solid var(--border);border-radius:10px;padding:0.55rem;cursor:pointer;transition:all 0.2s;text-align:center}
+.plan-btn.selected{border-color:var(--gold2);background:rgba(212,168,67,0.12)}
+.plan-btn:hover{border-color:var(--gold2)}
+.plan-amt{font-size:1.1rem;font-weight:800;color:var(--gold2)}
+.plan-lbl{font-size:0.6rem;color:var(--muted);margin-top:0.1rem;text-transform:uppercase}
+/* HISTORIAL GANANCIAS */
+.hist-card{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:0.55rem;margin-bottom:0.38rem}
+.hist-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:0.18rem}
+.hist-lbl{font-size:0.62rem;color:var(--muted)}
+.hist-val{font-size:0.72rem;font-weight:700}
+.resumen-card{background:linear-gradient(135deg,rgba(212,168,67,0.1),rgba(46,204,113,0.08));border:1px solid rgba(212,168,67,0.25);border-radius:12px;padding:0.65rem;margin-bottom:0.45rem}
+/* NOTICIAS */
+.noticia-card{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:0.78rem;margin-bottom:0.42rem;}
+.noticia-fuente{font-size:0.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.16rem;}
+.noticia-titulo{font-size:0.8rem;font-weight:700;color:var(--text);margin-bottom:0.2rem;line-height:1.4;}
+.noticia-resumen{font-size:0.68rem;color:var(--muted);line-height:1.55;}
+.noticia-fecha{font-size:0.58rem;color:var(--gold);margin-top:0.28rem;font-weight:700;}
+/* PERFIL */
+.perfil-avatar{width:68px;height:68px;border-radius:50%;background:linear-gradient(135deg,var(--gold),#8a6518);display:flex;align-items:center;justify-content:center;font-size:1.9rem;margin:0 auto 0.55rem;}
+.soporte-card{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:0.82rem;margin:0 0.95rem;margin-top:0.52rem;}
+.soporte-btn{display:flex;align-items:center;gap:0.52rem;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;padding:0.62rem 0.75rem;margin-bottom:0.35rem;cursor:pointer;text-decoration:none;color:var(--text);}
+.soporte-ic{font-size:1.05rem;flex-shrink:0;}
+.soporte-txt{font-size:0.78rem;font-weight:700;}
+.soporte-sub{font-size:0.61rem;color:var(--muted);}
+.trade-img{width:100%;border-radius:10px;margin-bottom:0.42rem;border:1px solid var(--border);}
+/* BLOQUEO */
+.blocked-banner{background:var(--redd);border:1px solid rgba(231,76,60,0.3);border-radius:10px;padding:0.55rem 0.75rem;font-size:0.7rem;color:#ff9080;display:flex;align-items:center;gap:0.4rem;margin-top:0.42rem;}
+
+  
+  .sync-dot { width: 9px; height: 9px; border-radius: 50%; background: #95a5a6; display: inline-block; margin-left: 8px; transition: all 0.3s; vertical-align: middle; }
+  .sync-dot.ok { background: #2ecc71; box-shadow: 0 0 10px #2ecc71; }
+  .sync-dot.saving { background: #f1c40f; box-shadow: 0 0 10px #f1c40f; animation: pulse-sync 0.8s infinite; }
+  .sync-dot.bot { background: #3498db; box-shadow: 0 0 12px #3498db; animation: flash-sync 0.5s 2; }
+  @keyframes pulse-sync { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
+  @keyframes flash-sync { 0% { transform: scale(1); } 50% { transform: scale(1.5); } 100% { transform: scale(1); } }
+
+  .sync-dot.ok { background: #2ecc71; box-shadow: 0 0 8px #2ecc71; }
+  .sync-dot.saving { background: #f1c40f; box-shadow: 0 0 8px #f1c40f; animation: pulse-sync 1s infinite; }
+  @keyframes pulse-sync { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
+
+
+  /* Estilos V9 Premium */
+  :root { --glass: rgba(255, 255, 255, 0.05); --glass-border: rgba(255, 255, 255, 0.1); }
+  
+  /* Estilos V10 Compactos */
+  .card-premium { background: var(--glass); backdrop-filter: blur(10px); border: 1px solid var(--glass-border); border-radius: 16px; padding: 0.75rem; margin-bottom: 0.6rem; }
+  .pool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 6px 0; }
+  .pool-item { background: rgba(0,0,0,0.15); padding: 8px; border-radius: 10px; border: 1px solid var(--glass-border); }
+  .pool-lbl { font-size: 0.55rem; color: var(--muted); text-transform: uppercase; margin-bottom: 2px; }
+  .pool-val { font-size: 0.85rem; font-weight: 800; color: var(--text); }
+  .chart-container { height: 110px; width: 100%; margin-top: 5px; }
+  .hdr-brand { font-size: 0.9rem; font-weight: 900; }
+  .frase-card { padding: 0.4rem 0.7rem; margin: 0.5rem 1rem; }
+  .frase-txt { font-size: 0.68rem; line-height: 1.2; }
+
+  .toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; pointer-events: none; }
+  .toast { background: var(--card); border-left: 4px solid var(--gold); padding: 12px 20px; border-radius: 8px; margin-bottom: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); display: flex; align-items: center; gap: 10px; animation: slideInRight 0.5s; pointer-events: auto; }
+  .pool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0; }
+  .pool-item { background: rgba(0,0,0,0.2); padding: 10px; border-radius: 12px; border: 1px solid var(--glass-border); }
+  .pool-lbl { font-size: 0.6rem; color: var(--muted); text-transform: uppercase; }
+  .pool-val { font-size: 0.9rem; font-weight: 800; color: var(--text); }
+  .chart-container { height: 150px; width: 100%; margin-top: 10px; }
+  .notif-bell { position: relative; cursor: pointer; padding: 5px; }
+  .notif-badge { position: absolute; top: 0; right: 0; background: var(--red); width: 8px; height: 8px; border-radius: 50%; display: none; }
+
+</style>
+
+  <!-- Librerías V9 -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css"/>
+
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="sLogin" class="scr on">
+  <div class="logo">
+    <div class="logo-icon" id="logoIcon">
+      <svg width="54" height="48" viewBox="0 0 54 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <!-- Fondo rejilla sutil -->
+        <line x1="0" y1="36" x2="54" y2="36" stroke="rgba(46,204,113,0.1)" stroke-width="0.5"/>
+        <line x1="0" y1="24" x2="54" y2="24" stroke="rgba(46,204,113,0.1)" stroke-width="0.5"/>
+        <line x1="0" y1="12" x2="54" y2="12" stroke="rgba(46,204,113,0.1)" stroke-width="0.5"/>
+        <!-- Barras chart animadas -->
+        <rect x="3" y="28" width="7" height="10" rx="2" fill="rgba(46,204,113,0.4)" style="animation:pulse2 2.5s ease-in-out infinite;animation-delay:0s"/>
+        <rect x="13" y="20" width="7" height="18" rx="2" fill="rgba(46,204,113,0.55)" style="animation:pulse2 2.5s ease-in-out infinite;animation-delay:0.3s"/>
+        <rect x="23" y="14" width="7" height="24" rx="2" fill="rgba(46,204,113,0.7)" style="animation:pulse2 2.5s ease-in-out infinite;animation-delay:0.6s"/>
+        <rect x="33" y="8" width="7" height="30" rx="2" fill="rgba(46,204,113,0.85)" style="animation:pulse2 2.5s ease-in-out infinite;animation-delay:0.9s"/>
+        <rect x="43" y="3" width="7" height="35" rx="2" fill="#2ecc71" style="animation:pulse2 2.5s ease-in-out infinite;animation-delay:1.2s"/>
+        <!-- Línea de tendencia -->
+        <polyline points="6,33 16,24 26,18 36,12 46,5" stroke="#d4a843" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"
+          stroke-dasharray="90" stroke-dashoffset="90" style="animation:chartRise 1.8s ease-out forwards;animation-delay:0.2s"/>
+        <!-- Punto brillante en el extremo -->
+        <circle cx="46" cy="5" r="2.5" fill="#f5cb5c" style="animation:sparkle 2s ease-in-out infinite;animation-delay:2s"/>
+        <!-- Estrella / chispa arriba -->
+        <circle cx="50" cy="1" r="1.2" fill="#2ecc71" style="animation:sparkle 2.5s ease-in-out infinite;animation-delay:0.5s"/>
+        <circle cx="3" cy="3" r="1" fill="#d4a843" style="animation:sparkle 3s ease-in-out infinite;animation-delay:1s"/>
+      </svg>
+    </div>
+    <h1>Safe Growth Hub</h1>
+    <p style="color:rgba(46,204,113,0.7);letter-spacing:0.18em;font-size:0.71rem;text-transform:uppercase;margin-top:0.2rem">🌱 Crece · Multiplica · Gana</p>
+  </div>
+  <div class="card" id="cLogin">
+    <h2>Iniciar Sesión</h2>
+    <div class="errmsg" id="eLogin"></div>
+    <div class="fld"><label>Teléfono</label><input id="lPhone" type="tel" placeholder="Ej: 5551234567"></div>
+    <div class="fld"><label>PIN de acceso</label><input id="lPin" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+    <button class="btn" onclick="doLogin()">Entrar</button>
+    <div class="link-row">¿Sin cuenta? <a onclick="tog(true)">Regístrate</a> · <a onclick="tog('rec')">Recuperar PIN</a></div>
+  </div>
+  <!-- RECUPERAR PIN -->
+  <div class="card" id="cRec" style="display:none">
+    <h2>Recuperar PIN</h2>
+    <div class="errmsg" id="eRec"></div><div class="okmsg" id="okRec"></div>
+    <div class="info-b blue">Ingresa tu teléfono y correo registrado. Si coinciden, podrás crear un nuevo PIN.</div>
+    <div class="fld"><label>Teléfono registrado</label><input id="recPhone" type="tel" placeholder="Ej: 5551234567"></div>
+    <div class="fld"><label>Correo electrónico registrado</label><input id="recEmail" type="email" placeholder="tu@correo.com"></div>
+    <div class="fld" id="recNewPinFld" style="display:none"><label>Nuevo PIN (4 dígitos)</label><input id="recNewPin" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+    <button class="btn" onclick="doRecover()">Verificar y Recuperar</button>
+    <div class="link-row"><a onclick="tog(false)">← Volver al login</a></div>
+  </div>
+  <div class="card" id="cReg" style="display:none">
+    <h2>Crear Cuenta</h2>
+    <div class="errmsg" id="eReg"></div>
+    <div class="ref-badge" id="refBadge" style="display:none">🎁 Referido por: <span id="refNombre"></span></div>
+    <div class="fld"><label>Nombre completo</label><input id="rName" type="text" placeholder="Tu nombre"></div>
+    <div class="fld"><label>Correo electrónico</label><input id="rEmail" type="email" placeholder="tu@correo.com"></div>
+    <div class="fld"><label>Teléfono</label><input id="rPhone" type="tel" placeholder="Ej: 5551234567"></div>
+    <div class="fld"><label>PIN de acceso (4 dígitos)</label><input id="rPin" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+    <div class="fld"><label>PIN de retiro (diferente)</label><input id="rWpin" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+    <div class="fld" id="refManualFld"><label>Código de referido (opcional)</label><input id="rRefCode" type="text" maxlength="6" placeholder="Ej: A3F7K2" style="text-transform:uppercase;letter-spacing:0.1em" oninput="this.value=this.value.toUpperCase()"></div>
+    <button class="btn" onclick="doReg()">Crear cuenta</button>
+    <div class="link-row">¿Ya tienes cuenta? <a onclick="tog(false)">Inicia sesión</a></div>
+  </div>
+</div>
+
+<!-- DASHBOARD -->
+<div id="sDash" class="scr">
+  <div class="content">
+    <div class="hdr">
+      <div><div class="hdr-brand">🌱 Safe Growth Hub <span id="syncDot" class="sync-dot" title="Conectando..."></span></div></div>
+      <div class="hdr-time" id="hTime"></div>
+      <button class="btnout" onclick="logout()">Salir</button>
+    </div>
+    <div style="padding:0.28rem 1rem 0;font-size:0.78rem;color:var(--muted)">Hola, <strong id="uName" style="color:var(--text)"></strong> 👋</div>
+    <div class="frase-card"><div style="font-size:0.92rem">💎</div><div class="frase-txt" id="fraseTxt"></div></div>
+
+    
+    <!-- GRÁFICO PROFESIONAL TRADINGVIEW CON SELECTOR -->
+
+      <!-- POOL DE TRADING V9 -->
+      <div class="card-premium animate__animated animate__fadeIn">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+          <div style="font-weight:800; font-size:0.9rem;">📊 MI PARTICIPACIÓN</div>
+          <div class="notif-bell" onclick="openM('mNotif')">🔔<span id="notifBadge" class="notif-badge"></span></div>
+        </div>
+        <div class="pool-grid">
+          <div class="pool-item"><div class="pool-lbl">Capital aportado</div><div class="pool-val" id="v9-capAportado">$0.00</div></div>
+          <div class="pool-item"><div class="pool-lbl">Participación</div><div class="pool-val" id="v9-participacion">0%</div></div>
+          <div class="pool-item"><div class="pool-lbl">Ganancia acumulada</div><div class="pool-val gc" id="v9-ganAcum">+$0.00</div></div>
+          <div class="pool-item"><div class="pool-lbl">Valor actual</div><div class="pool-val go" id="v9-valActual">$0.00</div></div>
+        </div>
+        <div id="growthChartWrap" style="margin-top:10px;min-height:0;"></div>
+
+        <!-- ESTADO DEL SISTEMA dentro del card -->
+        <div style="margin-top:0.75rem;border-top:1px solid rgba(212,168,67,0.12);padding-top:0.75rem;">
+          <!-- Fila 1: Sistema + Mercado -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.55rem;margin-bottom:0.55rem;">
+            <div style="background:rgba(0,0,0,0.2);border:1px solid rgba(46,204,113,0.18);border-radius:10px;padding:0.6rem;">
+              <div style="font-size:0.57rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.38rem;">📊 Estado del Sistema</div>
+              <div style="display:flex;align-items:center;gap:0.3rem;margin-bottom:0.22rem;"><span>🟢</span><span style="font-size:0.66rem;font-weight:800;color:var(--green);">Operativo</span></div>
+              <div style="font-size:0.55rem;color:var(--muted);margin-bottom:0.1rem;">Motor: <span style="color:var(--gold2);font-weight:700;">Safe Growth Hub Engine</span></div>
+              <div style="font-size:0.54rem;color:var(--muted);margin-bottom:0.1rem;">Actualización: <span id="sysLastUpdate" style="color:var(--text);">--</span></div>
+              <div style="font-size:0.54rem;color:var(--muted);">Ops activas: <span id="sysOpsActivas" style="color:var(--gold);font-weight:800;">0</span></div>
+            </div>
+            <div style="background:rgba(0,0,0,0.2);border:1px solid rgba(52,152,219,0.18);border-radius:10px;padding:0.6rem;">
+              <div style="font-size:0.57rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.38rem;">📈 Estado del Mercado</div>
+              <div style="font-size:0.56rem;margin-bottom:0.15rem;display:flex;justify-content:space-between;"><span style="color:var(--gold2);font-weight:700;">BTC</span><span id="sysStatBTC" style="color:var(--muted);">—</span></div>
+              <div style="font-size:0.56rem;margin-bottom:0.15rem;display:flex;justify-content:space-between;"><span style="color:var(--gold2);font-weight:700;">ETH</span><span id="sysStatETH" style="color:var(--muted);">—</span></div>
+              <div style="font-size:0.56rem;margin-bottom:0.15rem;display:flex;justify-content:space-between;"><span style="color:var(--gold2);font-weight:700;">SOL</span><span id="sysStatSOL" style="color:var(--muted);">—</span></div>
+              <div style="font-size:0.53rem;color:var(--muted);border-top:1px solid rgba(255,255,255,0.05);padding-top:0.2rem;margin-top:0.1rem;">Tendencia: <span id="sysTendencia" style="color:var(--gold);font-weight:700;">Neutral</span></div>
+            </div>
+          </div>
+          <!-- Fila 2: Actividad Reciente -->
+          <div style="background:rgba(0,0,0,0.2);border:1px solid rgba(212,168,67,0.12);border-radius:10px;padding:0.6rem;">
+            <div style="font-size:0.57rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.35rem;">💰 Actividad Reciente</div>
+            <div id="sysActividadReciente" style="display:flex;flex-wrap:wrap;gap:0.3rem;"><span style="font-size:0.56rem;color:var(--muted);">Sin actividad</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card-premium animate__animated animate__fadeIn">
+        <div style="font-weight:800; font-size:0.9rem; margin-bottom:10px;">🌊 POOL GLOBAL</div>
+        <div class="pool-grid">
+          <div class="pool-item"><div class="pool-lbl">Capital Total</div><div class="pool-val" id="v9-poolTotal">$0.00</div></div>
+          <div class="pool-item"><div class="pool-lbl">Capital Operando</div><div class="pool-val" id="v9-poolOperando">$0.00</div></div>
+          <div class="pool-item"><div class="pool-lbl">Inversores</div><div class="pool-val" id="v9-poolInv">0</div></div>
+          <div class="pool-item"><div class="pool-lbl">Ops Activas</div><div class="pool-val" id="v9-poolOps">0</div></div>
+        </div>
+        <!-- PnL diario del pool -->
+        <div style="margin-top:0.6rem;background:rgba(46,204,113,0.07);border:1px solid rgba(46,204,113,0.2);border-radius:10px;padding:0.55rem 0.75rem;display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-size:0.56rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">PnL del día (pool total)</div>
+            <div style="font-size:0.55rem;color:var(--muted)" id="poolPnlSub">Ops cerradas hoy</div>
+          </div>
+          <div style="font-size:1rem;font-weight:800;color:var(--green)" id="v9-pnlDia">+$0.00</div>
+        </div>
+      </div>
+
+    <div class="card" style="padding:0; overflow:hidden; margin-bottom:0.75rem; border:1px solid var(--border); border-radius:15px; position:relative;">
+      <div style="position:absolute; top:10px; right:10px; z-index:10; background:rgba(0,0,0,0.6); padding:4px; border-radius:8px; display:flex; gap:5px;">
+        <select id="tvSymbol" onchange="changeTVSymbol(this.value)" style="background:none; color:white; border:none; font-size:0.65rem; font-weight:bold; cursor:pointer; outline:none;">
+          <option value="BINANCE:BTCUSDT">BTC/USDT</option>
+          <option value="BINANCE:ETHUSDT">ETH/USDT</option>
+          <option value="BINANCE:SOLUSDT">SOL/USDT</option>
+          <option value="BINANCE:TRXUSDT">TRX/USDT</option>
+          <option value="OANDA:XAUUSD">ORO (GOLD)</option>
+          <option value="NASDAQ:AAPL">APPLE</option>
+          <option value="NASDAQ:TSLA">TESLA</option>
+          <option value="NASDAQ:NVDA">NVIDIA</option>
+        </select>
+      </div>
+      <div id="tradingview_widget" style="height:220px; width:100%;"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+        window.tvWidget = null;
+        window.initTV = function(symbol = "BINANCE:BTCUSDT") {
+          const container = document.getElementById('tradingview_widget');
+          if (!container) return;
+          if (!window.TradingView || typeof TradingView.widget !== 'function') {
+            container.innerHTML = '<div style="height:100%;display:flex;align-items:center;justify-content:center;text-align:center;padding:1rem;color:var(--muted);border:1px dashed var(--border);border-radius:12px">Gráfico no disponible temporalmente. Verifica tu conexión o bloqueadores de scripts.</div>';
+            console.warn('TradingView no disponible; se muestra fallback visual.');
+            return;
+          }
+          try {
+            container.innerHTML = '';
+            window.tvWidget = new TradingView.widget({
+              autosize: true,
+              symbol: symbol,
+              interval: "60",
+              timezone: "Etc/UTC",
+              theme: "dark",
+              style: "3",
+              locale: "es",
+              toolbar_bg: "#f1f3f6",
+              enable_publishing: false,
+              hide_top_toolbar: true,
+              save_image: false,
+              container_id: "tradingview_widget"
+            });
+          } catch (e) {
+            console.warn('TradingView init error:', e);
+            container.innerHTML = '<div style="height:100%;display:flex;align-items:center;justify-content:center;text-align:center;padding:1rem;color:var(--muted);border:1px dashed var(--border);border-radius:12px">No se pudo cargar el gráfico en este momento.</div>';
+          }
+        };
+        window.changeTVSymbol = function(sym) {
+          try { localStorage.setItem('sgh_tv_sym', sym); } catch(e) {}
+          window.initTV(sym);
+        };
+        window.addEventListener('load', function(){
+          setTimeout(() => {
+            const saved = localStorage.getItem('sgh_tv_sym') || "BINANCE:BTCUSDT";
+            const sel = document.getElementById('tvSymbol');
+            if (sel) sel.value = saved;
+            window.initTV(saved);
+          }, 1500);
+        });
+      </script>
+    </div>
+
+    <!-- TICKER REMOVIDO -->
+
+    <!-- TAB INICIO -->
+    <div id="t-home" class="tab on">
+      <div class="res-grid" style="margin-top:0.52rem">
+        <div class="res-card"><div class="res-ic">🤖</div><div class="res-lbl">Capital Bot</div><div class="res-val go" id="rCapBot">$0.00</div></div>
+        <div class="res-card"><div class="res-ic">📈</div><div class="res-lbl">Ganancia hoy</div><div class="res-val gc" id="rHoy">$0.00</div></div>
+        <div class="res-card"><div class="res-ic">💼</div><div class="res-lbl">Capital Acciones</div><div class="res-val" style="color:var(--blue)" id="rCapAcc">$0.00</div></div>
+        <div class="res-card"><div class="res-ic">👥</div><div class="res-lbl">Referidos</div><div class="res-val" style="color:var(--purple)" id="rRefs">0</div></div>
+      </div>
+
+      <!-- BOT LIVE -->
+      <div class="bot-live">
+        <div class="blh">
+          <div><div class="blt"><span class="live-dot"></span>Pool de Trading · En vivo</div><div class="blp">Range Trading SOL · ETH · BTC</div></div>
+          <div class="bls on" id="liveStatus">🟢 Operando</div>
+        </div>
+        <div class="blb">
+          <div style="font-size:0.58rem;color:var(--muted);text-transform:uppercase;margin-bottom:0.38rem">Operaciones activas</div>
+          <div id="liveOps"><div class="empty" style="padding:0.45rem">Sin operaciones hoy</div></div>
+          <div class="pnl-box">
+            <div><div class="pnl-lbl">Tu ganancia hoy (50%/75%)</div><div style="font-size:0.56rem;color:var(--muted)" id="liveCapLbl">Capital: $0.00</div></div>
+            <div class="pnl-val" id="livePnlHoy">$0.00</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- BLOQUEO si hay ops abiertas -->
+      <div id="blockedBanner" style="display:none;padding:0 0.95rem;margin-bottom:0.52rem">
+        <div class="blocked-banner">🔒 Tienes operaciones activas. Los retiros se procesan cuando cierren todas las posiciones.</div>
+      </div>
+
+      <!-- REF CARD -->
+      <div class="ref-card">
+        <div class="sec-ttl" style="margin-bottom:0.42rem">👥 Mi link de referidos</div>
+        <div class="info-b purple" style="font-size:0.68rem;margin-bottom:0.45rem">🚀 Con referidos activos tu ganancia del bot sube del <strong>50% al 75%</strong>. En acciones recibes el <strong>2% en acciones</strong> de lo que compren tus referidos.</div>
+        <div class="ref-link" id="refLink">Cargando...</div>
+        <div style="background:rgba(212,168,67,0.1);border:1px solid rgba(212,168,67,0.28);border-radius:10px;padding:0.45rem 0.75rem;margin-bottom:0.45rem;display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:0.68rem;color:var(--muted)">Tu código de referido:</span>
+          <strong id="myRefCodeDisplay" style="font-size:1.05rem;color:var(--gold2);font-family:monospace;letter-spacing:0.14em">------</strong>
+        </div>
+        <button class="copy-btn" onclick="copyRefLink()">📋 Copiar mi link</button>
+        <div style="margin-top:0.42rem;font-size:0.65rem;color:var(--muted)">Tus referidos activos: <strong id="refCount" style="color:var(--green)">0</strong> · También puedes dar tu <strong style="color:var(--gold2)">código</strong> si el link no abre</div>
+      </div>
+
+      <div style="display:flex;gap:0.42rem;padding:0 0.95rem;margin-bottom:0.75rem">
+        <button class="btn" style="flex:1;margin-top:0;padding:0.65rem;font-size:0.8rem" onclick="openM('dep')">⬆️ Depositar Bot</button>
+        <button class="btn red" style="flex:1;margin-top:0;padding:0.65rem;font-size:0.8rem" onclick="openM('ret')">⬇️ Retirar Bot</button>
+      </div>
+      <div style="padding:0 0.95rem;margin-bottom:0.52rem">
+        <button class="btn purple" style="margin-top:0;padding:0.65rem;font-size:0.8rem" onclick="openM('memb')">🎓 Pagar Membresía</button>
+      </div>
+
+      <div class="sec"><div class="sec-ttl">Todos los Movimientos</div><div id="txnAll"></div></div>
+    </div>
+
+    <!-- TAB P&L DIARIO -->
+    <div id="t-stocks" class="tab">
+      <!-- Resumen acciones -->
+      <div style="padding:0 0.95rem;margin-top:0.65rem">
+        <div class="sec-ttl">💼 Mi Portafolio de Acciones</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.42rem;margin-bottom:0.65rem;">
+          <div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:0.55rem;text-align:center;">
+            <div style="font-size:0.52rem;color:var(--muted);text-transform:uppercase;margin-bottom:0.18rem;">Invertido</div>
+            <div id="sInv" style="font-size:0.88rem;font-weight:800;color:var(--text);">$0.00</div>
+          </div>
+          <div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:0.55rem;text-align:center;">
+            <div style="font-size:0.52rem;color:var(--muted);text-transform:uppercase;margin-bottom:0.18rem;">Valor actual</div>
+            <div id="sVal" style="font-size:0.88rem;font-weight:800;color:var(--blue);">$0.00</div>
+          </div>
+          <div style="background:var(--card);border:1px solid var(--border);border-radius:11px;padding:0.55rem;text-align:center;">
+            <div style="font-size:0.52rem;color:var(--muted);text-transform:uppercase;margin-bottom:0.18rem;">P&L</div>
+            <div id="sPl" style="font-size:0.88rem;font-weight:800;color:var(--green);">$0.00</div>
+          </div>
+        </div>
+      </div>
+      <!-- Contenido renderizado por renderStocks() -->
+      <div id="stocksContent" style="padding:0 0.95rem;"></div>
+      <!-- Dividendos -->
+      <div style="padding:0 0.95rem;margin-top:0.55rem">
+        <div class="sec-ttl">💰 Historial de Dividendos</div>
+        <div id="divHist"><div class="empty">Sin dividendos aún</div></div>
+      </div>
+      <!-- P&L Diario -->
+      <div style="padding:0 0.95rem;margin-top:0.65rem">
+        <div class="sec-ttl">📊 Distribución de P&L Diario</div>
+        <div style="background:linear-gradient(135deg,rgba(212,168,67,0.08),rgba(46,204,113,0.06));border:1px solid rgba(212,168,67,0.2);border-radius:14px;padding:0.85rem;margin-bottom:0.65rem;">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.55rem;margin-bottom:0.55rem;">
+            <div style="background:rgba(0,0,0,0.2);border-radius:10px;padding:0.55rem;">
+              <div style="font-size:0.52rem;color:var(--muted);text-transform:uppercase;margin-bottom:0.18rem;">P&L Global Hoy</div>
+              <div id="pnlGlobalHoy" style="font-size:1.1rem;font-weight:800;color:var(--green);">$0.00</div>
+            </div>
+            <div style="background:rgba(0,0,0,0.2);border-radius:10px;padding:0.55rem;">
+              <div style="font-size:0.52rem;color:var(--muted);text-transform:uppercase;margin-bottom:0.18rem;">Tu P&L (50%/75%)</div>
+              <div id="pnlUsuarioHoy" style="font-size:1.1rem;font-weight:800;color:var(--gold2);">$0.00</div>
+            </div>
+            <div style="background:rgba(0,0,0,0.2);border-radius:10px;padding:0.55rem;">
+              <div style="font-size:0.52rem;color:var(--muted);text-transform:uppercase;margin-bottom:0.18rem;">P&L Total Acumulado</div>
+              <div id="pnlTotalAcumulado" style="font-size:1.1rem;font-weight:800;color:var(--blue);">$0.00</div>
+            </div>
+            <div style="background:rgba(0,0,0,0.2);border-radius:10px;padding:0.55rem;">
+              <div style="font-size:0.52rem;color:var(--muted);text-transform:uppercase;margin-bottom:0.18rem;">Tu Total Acumulado</div>
+              <div id="pnlUsuarioAcumulado" style="font-size:1.1rem;font-weight:800;color:var(--green);">$0.00</div>
+            </div>
+          </div>
+        </div>
+        <div class="sec-ttl" style="margin-top:0.65rem">📅 Historial de P&L por Día</div>
+      </div>
+      <div class="sec"><div id="pnlDiarioHist"><div class="empty">Sin registros de P&L diario</div></div></div>
+    </div>
+
+    <!-- TAB GANANCIAS -->
+    <div id="t-earn" class="tab">
+      <div class="sec" style="margin-top:0.65rem">
+        <div class="sec-ttl">📈 Operaciones Cerradas</div>
+        <div id="earnHist"></div>
+      </div>
+    </div>
+
+    <!-- TAB NOSOTROS -->
+    <div id="t-nos" class="tab">
+      <div class="nos-hero">
+        <div style="font-size:1.8rem;margin-bottom:0.35rem">🌱</div>
+        <div class="nos-ttl">¿Quiénes somos?</div>
+        <div class="nos-sub">Somos personas comunes que decidieron unir fuerzas, dejar que la tecnología automatizada trabaje y construir un espacio donde todos generemos ingresos mientras crecemos juntos.</div>
+      </div>
+      <div class="nos-block"><div class="nos-block-ttl">🎯 Nuestra Misión</div><div class="nos-block-txt">Democratizar el acceso al trading automatizado, ofreciendo una herramienta de alta precisión que <strong>proteja y potencie el capital</strong> de personas comunes dentro de un entorno transparente, educativo y de mutuo apoyo.</div></div>
+      <div class="nos-block"><div class="nos-block-ttl">🔭 Nuestra Visión</div><div class="nos-block-txt">Convertirnos en el <strong>centro de crecimiento colaborativo más confiable</strong> de la región, demostrando que con disciplina, tecnología y comunidad, la evolución financiera es posible para todos.</div></div>
+      <div class="nos-block"><div class="nos-block-ttl">💡 Lo que nos hace diferentes</div><div class="nos-block-txt">No prometemos riqueza de la noche a la mañana. Ofrecemos un <strong>espacio real de crecimiento colectivo</strong>. Si el mercado nos enseña algo nuevo, lo aprendemos juntos. Si los bots generan beneficios, los celebramos juntos. <strong>Tu crecimiento es nuestro crecimiento.</strong></div></div>
+      <div class="nos-block" style="margin-top:0.52rem"><div class="nos-block-ttl">📸 Trades en Binance</div><div class="nos-block-txt" style="margin-bottom:0.6rem">Capturas reales de nuestras operaciones ejecutadas.</div><div id="tradesFotos"><div class="empty">Sin capturas cargadas</div></div></div>
+      <div style="height:0.52rem"></div>
+    </div>
+
+    <!-- TAB INFO -->
+    <div id="t-info" class="tab">
+      <div style="padding:0 0.95rem;margin-top:0.65rem;margin-bottom:0.45rem"><div class="sec-ttl">📚 Cómo Operamos</div></div>
+      <div class="info-sec"><div class="info-sec-hdr" onclick="tInfo('pool')"><span class="info-sec-hdr-txt">🏦 ¿Qué es el Pool?</span><span id="arr-pool">▼</span></div><div class="info-sec-body" id="body-pool"><p>Un Pool es un <strong>fondo común</strong> donde sumamos los capitales de la comunidad para crear volumen robusto. Se conecta a <strong>algoritmos y bots de trading de alta precisión</strong> que analizan el mercado las 24 horas buscando y ejecutando las mejores oportunidades de forma sistemática.</p></div></div>
+      <div class="info-sec"><div class="info-sec-hdr" onclick="tInfo('sem')"><span class="info-sec-hdr-txt">🚦 El Semáforo del Mercado</span><span id="arr-sem">▼</span></div><div class="info-sec-body" id="body-sem"><div class="semaforo"><div class="sem-item green">🟢 <strong>Días de Éxito:</strong> El mercado se mueve con fuerza. Los bots operan con precisión, generando ganancias rápidas y eficientes.</div><div class="sem-item yellow">🟡 <strong>Días de Calma:</strong> Precio lateral sin dirección. Los bots esperan el momento perfecto protegiendo tu saldo.</div><div class="sem-item red">🔴 <strong>Días de Paciencia:</strong> Mercado en retroceso. El sistema pausa la toma de beneficios para proteger el capital. Una bajada no es una pérdida real; es gestión disciplinada.</div></div></div></div>
+      <div class="info-sec"><div class="info-sec-hdr" onclick="tInfo('modelo')"><span class="info-sec-hdr-txt">⚖️ Modelo 50/50 · Ganar-Ganar</span><span id="arr-modelo">▼</span></div><div class="info-sec-body" id="body-modelo"><div class="modelo-50"><div class="modelo-col" style="border:1px solid rgba(46,204,113,0.2)"><div class="modelo-pct gc">50%</div><div class="modelo-desc">Para ti como inversor (75% con referidos activos)</div></div><div class="modelo-col" style="border:1px solid var(--border)"><div class="modelo-pct go">50%</div><div class="modelo-desc">Equipo técnico que desarrolla y mantiene los algoritmos</div></div></div><p style="margin-top:0.45rem">🚀 Con referidos activos tu porcentaje sube al <strong style="color:var(--green)">75%</strong>.</p></div></div>
+      <div class="info-sec"><div class="info-sec-hdr" onclick="tInfo('ret')"><span class="info-sec-hdr-txt">🔒 Política de Retiro Bot</span><span id="arr-ret">▼</span></div><div class="info-sec-body" id="body-ret"><p><strong style="color:var(--red)">⚠️ No se procesan retiros mientras existan operaciones activas (PNL flotante).</strong></p><p>Cuando el bot tiene posiciones abiertas, ese dinero está comprometido en el mercado. Si retiraras en ese instante, el mercado liquidaría la posición a un valor inferior. Los retiros se ejecutan cuando <strong>todas las posiciones del día han cerrado en ganancia</strong>.</p><p>Se aplica una <strong>comisión del 3%</strong> sobre el monto retirado.</p></div></div>
+      <div class="info-sec"><div class="info-sec-hdr" onclick="tInfo('acc')"><span class="info-sec-hdr-txt">💼 Cómo funcionan las Acciones</span><span id="arr-acc">▼</span></div><div class="info-sec-body" id="body-acc"><p>Las acciones son <strong>completamente independientes del pool del bot</strong>. Al comprar una acción te conviertes en propietario parcial de una empresa real. El precio varía con el mercado en tiempo real.</p><p><strong>Comisión:</strong> El 2% de las acciones compradas (en acciones, no en dinero) va al equipo. Si compras 1 acción, el 2% = 0.02 acciones quedan para el equipo.</p><p><strong>Dividendos:</strong> Empresas como Coca-Cola, Apple, Johnson & Johnson pagan dividendos periódicos que se abonan directamente a tu cuenta.</p><p><strong>Impuestos:</strong> Las plusvalías (ganancias al vender) están sujetas a un impuesto estimado del 1.5% según las normativas internacionales.</p><p><strong>Para retirar tu inversión</strong> en acciones debes venderlas desde tu portafolio. Solo puedes retirar vendiendo, no directamente.</p><p><strong>Referidos en acciones:</strong> Si un amigo que referiste compra acciones, tú recibes el 2% de sus acciones como bono.</p></div></div>
+      <div class="info-sec"><div class="info-sec-hdr" onclick="tInfo('memb')"><span class="info-sec-hdr-txt">🎓 Membresía</span><span id="arr-memb">▼</span></div><div class="info-sec-body" id="body-memb"><p>La membresía es un pago <strong>separado del depósito del bot</strong>. Cubre:</p><p>✅ Actualizaciones y mantenimiento de los algoritmos<br>✅ Clases de trading para tu educación financiera<br>✅ Soporte personalizado<br>✅ Acceso a herramientas y análisis exclusivos</p><p>Monto: <strong>10% sobre tu depósito inicial</strong>. Ejemplo: si depositas $100 al bot, la membresía es $10 por separado.</p></div></div>
+      <div class="info-sec"><div class="info-sec-hdr" onclick="tInfo('interes')"><span class="info-sec-hdr-txt">🚀 Interés Compuesto</span><span id="arr-interes">▼</span></div><div class="info-sec-body" id="body-interes"><p>La verdadera magia financiera se construye en el mediano y largo plazo. En lugar de retirar tus ganancias diarias, déjalas acumular dentro del pool. Las ganancias de hoy se suman a tu capital de mañana, y en el siguiente ciclo los bots operarán con un <strong>volumen mayor</strong>, generando rendimientos exponencialmente más grandes.</p><p><em style="color:var(--gold2)">"El interés compuesto es la fuerza más poderosa del universo financiero."</em></p></div></div>
+      <div style="height:0.52rem"></div>
+    </div>
+
+
+
+    <!-- TAB PERFIL -->
+    <div id="t-profile" class="tab">
+      <div style="padding:0.75rem 0.95rem 0;text-align:center">
+        <div class="perfil-avatar" id="profileAvatar">👤</div>
+        <div style="font-size:0.98rem;font-weight:800" id="profileName">--</div>
+        <div style="font-size:0.7rem;color:var(--muted)" id="profilePhone">--</div>
+        <div style="font-size:0.7rem;color:var(--muted)" id="profileEmail">--</div>
+      </div>
+      <div class="soporte-card">
+        <div class="nos-block-ttl" style="margin-bottom:0.55rem">🔐 Cambiar PIN de acceso</div>
+        <div class="errmsg" id="eCamPin"></div><div class="okmsg" id="okCamPin"></div>
+        <div class="fld"><label>PIN actual</label><input id="pinActual" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+        <div class="fld"><label>Nuevo PIN</label><input id="pinNuevo" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+        <div class="fld"><label>Confirmar nuevo PIN</label><input id="pinConfirm" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+        <button class="btn" onclick="cambiarPin()">Cambiar PIN acceso</button>
+      </div>
+      <div class="soporte-card" style="margin-top:0.52rem">
+        <div class="nos-block-ttl" style="margin-bottom:0.55rem">🔑 Cambiar PIN de retiro</div>
+        <div class="errmsg" id="eCamWpin"></div><div class="okmsg" id="okCamWpin"></div>
+        <div class="fld"><label>PIN retiro actual</label><input id="wpinActual" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+        <div class="fld"><label>Nuevo PIN retiro</label><input id="wpinNuevo" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+        <div class="fld"><label>Confirmar nuevo PIN retiro</label><input id="wpinConfirm" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+        <button class="btn" onclick="cambiarWpin()">Cambiar PIN retiro</button>
+      </div>
+      <div class="soporte-card" style="margin-top:0.52rem">
+        <div class="nos-block-ttl" style="margin-bottom:0.52rem">📞 Soporte y Contacto</div>
+        <a class="soporte-btn" href="tel:+56926374085"><span class="soporte-ic">📞</span><div><div class="soporte-txt">Llamar a soporte</div><div class="soporte-sub">+56 9 2637 4085</div></div></a>
+        <a class="soporte-btn" href="https://wa.me/56926374085" target="_blank"><span class="soporte-ic">💬</span><div><div class="soporte-txt">WhatsApp</div><div class="soporte-sub">Escríbenos ahora</div></div></a>
+        <a class="soporte-btn" href="https://t.me/SAFEGROWTHHUBtrading" target="_blank"><span class="soporte-ic">✈️</span><div><div class="soporte-txt">Canal Telegram</div><div class="soporte-sub">@SAFEGROWTHHUBtrading</div></div></a>
+        <div class="soporte-btn" onclick="openM('chat')"><span class="soporte-ic">✉️</span><div><div class="soporte-txt">Chat interno</div><div class="soporte-sub">Mensaje al equipo</div></div></div>
+      </div>
+      <div style="height:0.52rem"></div>
+    </div>
+  </div>
+
+  <nav class="bnav">
+    <div class="ni on" id="n-home" onclick="sw('home')"><div class="ni-i">🏠</div><div class="ni-l">Inicio</div></div>
+    <div class="ni" id="n-stocks" onclick="sw('stocks')"><div class="ni-i">💼</div><div class="ni-l">Acciones</div></div>
+    <div class="ni" id="n-earn" onclick="sw('earn')"><div class="ni-i">💹</div><div class="ni-l">Ganancias</div></div>
+
+    <div class="ni" id="n-nos" onclick="sw('nos')"><div class="ni-i">🌱</div><div class="ni-l">Nosotros</div></div>
+    <div class="ni" id="n-info" onclick="sw('info')"><div class="ni-i">📚</div><div class="ni-l">Info</div></div>
+    <div class="ni" id="n-profile" onclick="sw('profile')"><div class="ni-i">👤</div><div class="ni-l">Perfil</div></div>
+  </nav>
+</div>
+
+<!-- MODAL DEPOSITO BOT -->
+<div class="mover" id="mDep">
+<div class="modal">
+  <button class="m-close" onclick="closeM('mDep')">✕</button>
+  <div class="m-handle"></div>
+  <div class="m-ttl">⬆️ Depositar al Pool Bot</div>
+  <div class="errmsg" id="eDep"></div><div class="okmsg" id="okDep"></div>
+  <div id="depStep1">
+    <div class="info-b blue">Tu capital ingresará al <strong>Pool Range Trading SOL·ETH·BTC</strong>. Rendimiento estimado: 0–1.5% diario.</div>
+    <div class="info-b purple">🎓 La membresía (10%) se paga <strong>por separado</strong> usando el botón "Pagar Membresía". El depósito del bot va directo a tu capital.</div>
+    <div style="margin-bottom:0.65rem">
+      <div style="font-size:0.68rem;color:var(--gold2);font-weight:700;text-transform:uppercase;margin-bottom:0.38rem">Selecciona tu plan</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.38rem;margin-bottom:0.42rem">
+        <button class="plan-btn" onclick="selPlan(50)" id="plan50">
+          <div class="plan-amt">$50</div><div class="plan-lbl">Inicio</div>
+        </button>
+        <button class="plan-btn" onclick="selPlan(100)" id="plan100">
+          <div class="plan-amt">$100</div><div class="plan-lbl">Básico</div>
+        </button>
+        <button class="plan-btn" onclick="selPlan(500)" id="plan500">
+          <div class="plan-amt">$500</div><div class="plan-lbl">Avanzado</div>
+        </button>
+        <button class="plan-btn" onclick="selPlan(1000)" id="plan1000">
+          <div class="plan-amt">$1,000</div><div class="plan-lbl">Pro</div>
+        </button>
+      </div>
+      <div style="font-size:0.65rem;color:var(--muted);margin-bottom:0.32rem;text-align:center">— o ingresa un monto personalizado —</div>
+    </div>
+    <div class="fld"><label>Monto a depositar (USDT) — Mínimo $50</label><input id="dAmt" type="number" placeholder="100" min="50" oninput="clearPlanSel()"></div>
+    <button class="btn" onclick="depNext()">Ver instrucciones →</button>
+  </div>
+  <div id="depStep2" style="display:none">
+    <div class="info-b green">Envía exactamente <strong id="depAmt2"></strong> USDT. Red: <strong>BEP-20 (BSC)</strong>.<br>Tu saldo se refleja solo cuando el admin confirme.</div>
+    <div class="wallet-box">
+      <div style="font-size:0.58rem;color:var(--muted);text-transform:uppercase;margin-bottom:0.38rem">Wallet de depósito — BOT</div>
+      <div class="wallet-network">BEP-20 · BSC</div>
+      <div class="wallet-addr">0x781eeb70f78030ec9e32a8a78b8e509b57365998</div>
+      <button class="copy-btn" onclick="copyW('0x781eeb70f78030ec9e32a8a78b8e509b57365998',this)">📋 Copiar dirección</button>
+    </div>
+    <div class="steps">
+      <div class="step"><div class="step-n">1</div><div class="step-t">Copia la dirección y abre tu wallet</div></div>
+      <div class="step"><div class="step-n">2</div><div class="step-t">Envía <strong id="depAmt3" style="color:var(--gold)"></strong> USDT por BEP-20</div></div>
+      <div class="step"><div class="step-n">3</div><div class="step-t">Toca el botón de abajo para notificar</div></div>
+    </div>
+    <div class="info-b red">⏳ Tu saldo NO se refleja hasta que el admin confirme la recepción.</div>
+    <button class="btn" onclick="confirmDeposit('bot')">✅ Ya realicé el depósito</button>
+    <button class="btn ghost" onclick="depBack()">← Cambiar monto</button>
+  </div>
+</div>
+</div>
+
+<!-- MODAL MEMBRESÍA -->
+<div class="mover" id="mMemb">
+<div class="modal">
+  <button class="m-close" onclick="closeM('mMemb')">✕</button>
+  <div class="m-handle"></div>
+  <div class="m-ttl">🎓 Pagar Membresía</div>
+  <div class="errmsg" id="eMemb"></div><div class="okmsg" id="okMemb"></div>
+  <div class="info-b purple">La membresía es <strong>independiente</strong> de tu depósito al bot. Cubre actualizaciones del sistema, clases de trading y soporte personalizado.</div>
+  <div class="fld"><label>¿Cuánto depositaste al bot? (para calcular tu 10%)</label><input id="membBase" type="number" placeholder="100" min="0" oninput="calcMembresiaModal()"></div>
+  <div class="info-b" id="membModalCalc" style="display:none"></div>
+  <div class="info-b green" style="margin-top:0.45rem">Envía la membresía a la misma wallet:<br><strong style="font-family:monospace;font-size:0.68rem">0x781eeb70f78030ec9e32a8a78b8e509b57365998</strong></div>
+  <button class="copy-btn" onclick="copyW('0x781eeb70f78030ec9e32a8a78b8e509b57365998',this)" style="margin-bottom:0.75rem">📋 Copiar wallet</button>
+  <button class="btn purple" onclick="confirmDeposit('memb')">✅ Ya pagué mi membresía</button>
+</div>
+</div>
+
+<!-- MODAL RETIRO BOT -->
+<div class="mover" id="mRet">
+<div class="modal">
+  <button class="m-close" onclick="closeM('mRet')">✕</button>
+  <div class="m-handle"></div>
+  <div class="m-ttl">⬇️ Retirar del Pool Bot</div>
+  <div class="errmsg" id="eRet"></div><div class="okmsg" id="okRet"></div>
+  <div class="info-b green">💰 Disponible Bot: <strong id="rAvailAmt">$0.00</strong></div>
+  <div class="info-b red">⚠️ Solo cuando NO haya PNL flotante. Comisión: 3%.</div>
+  <div class="cambio-box">
+    <div style="font-size:0.6rem;color:var(--muted);text-transform:uppercase;margin-bottom:0.35rem">Tipo de cambio</div>
+    <div class="cambio-row"><span class="cambio-lbl">🇺🇸 1 USDT</span><span class="cambio-val">= $1.00 USD</span></div>
+    <div class="cambio-row"><span class="cambio-lbl">🇨🇱 1 USDT</span><span class="cambio-val">≈ $950 CLP</span></div>
+    <div class="cambio-row"><span class="cambio-lbl">🇻🇪 1 USDT</span><span class="cambio-val">≈ Bs. 36.50</span></div>
+    <div class="cambio-row"><span class="cambio-lbl">🇲🇽 1 USDT</span><span class="cambio-val">≈ $17.50 MXN</span></div>
+  </div>
+  <div class="ret-tabs">
+    <button class="rtab on" onclick="retTab('usdt',this)">🪙 USDT</button>
+    <button class="rtab" onclick="retTab('chile',this)">🇨🇱 Chile</button>
+    <button class="rtab" onclick="retTab('vzla',this)">🇻🇪 Venezuela</button>
+    <button class="rtab" onclick="retTab('mx',this)">🇲🇽 México</button>
+  </div>
+  <div id="ret-usdt" class="ret-method on"><div class="fld"><label>Tu wallet BEP-20</label><input id="rWalletUsdt" type="text" placeholder="0x..."></div></div>
+  <div id="ret-chile" class="ret-method">
+    <div class="fld"><label>Banco</label><select id="rBancoChile"><option>Banco de Chile</option><option>Banco Estado</option><option>Santander Chile</option><option>BCI</option><option>Scotiabank Chile</option></select></div>
+    <div class="fld"><label>Tipo de cuenta</label><select id="rTipoChile"><option>Cuenta Corriente</option><option>Cuenta Vista</option><option>Cuenta de Ahorro</option><option>RUT</option></select></div>
+    <div class="fld"><label>RUT</label><input id="rRutChile" type="text" placeholder="12.345.678-9"></div>
+    <div class="fld"><label>N° Cuenta</label><input id="rCuentaChile" type="text" placeholder="Número de cuenta"></div>
+    <div class="fld"><label>Titular</label><input id="rTitularChile" type="text" placeholder="Nombre completo"></div>
+  </div>
+  <div id="ret-vzla" class="ret-method">
+    <div class="fld"><label>Banco</label><select id="rBancoVzla"><option>Banco de Venezuela</option><option>Bancamiga</option><option>Banesco</option><option>Mercantil</option><option>Provincial BBVA</option><option>BNC</option></select></div>
+    <div class="fld"><label>Tipo de cuenta</label><select id="rTipoVzla"><option>Cuenta Corriente</option><option>Cuenta de Ahorro</option></select></div>
+    <div class="fld"><label>Cédula</label><input id="rCedVzla" type="text" placeholder="V-12345678"></div>
+    <div class="fld"><label>N° Cuenta</label><input id="rCuentaVzla" type="text" placeholder="Número de cuenta"></div>
+    <div class="fld"><label>Titular</label><input id="rTitularVzla" type="text" placeholder="Nombre completo"></div>
+  </div>
+  <div id="ret-mx" class="ret-method">
+    <div class="fld"><label>Banco</label><select id="rBancoMx"><option>BBVA México</option><option>Banamex</option><option>Santander México</option><option>Banorte</option><option>HSBC México</option></select></div>
+    <div class="fld"><label>Tipo de cuenta</label><select id="rTipoMx"><option>CLABE</option><option>Cuenta de Débito</option></select></div>
+    <div class="fld"><label>CLABE / N° Cuenta</label><input id="rClabeMx" type="text" placeholder="18 dígitos"></div>
+    <div class="fld"><label>Titular</label><input id="rTitularMx" type="text" placeholder="Nombre completo"></div>
+  </div>
+  <div class="fld"><label>Monto a retirar (USDT) — Mínimo $5</label><input id="rAmt" type="number" placeholder="50" min="5" oninput="calcRet()"></div>
+  <div class="info-b" id="rCalc" style="display:none"></div>
+  <div class="fld"><label>PIN de retiro</label><input id="rWpin2" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+  <button class="btn red" onclick="doWithdraw()">Solicitar Retiro</button>
+</div>
+</div>
+
+<!-- MODAL COMPRAR ACCION -->
+<div class="mover" id="mComprarAcc">
+<div class="modal">
+  <button class="m-close" onclick="closeM('mComprarAcc')">✕</button>
+  <div class="m-handle"></div>
+  <div class="m-ttl" id="mAccTtl">Comprar acción</div>
+  <div class="errmsg" id="eComprarAcc"></div><div class="okmsg" id="okComprarAcc"></div>
+  <div class="info-b" id="mAccInfo"></div>
+  <div class="info-b blue" id="mAccPrecio"></div>
+  <div class="info-b purple" style="font-size:0.7rem">El 2% de las acciones compradas (en acciones) va al equipo de mantenimiento. Solo verás la cantidad neta de acciones en tu portafolio.</div>
+  <div class="fld"><label>Número de acciones a comprar</label><input id="accCantidad" type="number" placeholder="1" min="1" step="1" oninput="calcCompraAcc()"></div>
+  <div class="info-b" id="accCalc" style="display:none"></div>
+  <div class="fld"><label>PIN de acceso</label><input id="accPin" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+  <button class="btn green" onclick="confirmarCompraAcc()">✅ Solicitar compra</button>
+  <div class="info-b red" style="margin-top:0.45rem;font-size:0.68rem">El admin revisará y confirmará la operación con el precio real del mercado al momento de procesar.</div>
+</div>
+</div>
+
+<!-- MODAL VENDER ACCION -->
+<div class="mover" id="mVenderAcc">
+<div class="modal">
+  <button class="m-close" onclick="closeM('mVenderAcc')">✕</button>
+  <div class="m-handle"></div>
+  <div class="m-ttl" id="mVendTtl">Vender acción</div>
+  <div class="errmsg" id="eVenderAcc"></div><div class="okmsg" id="okVenderAcc"></div>
+  <div class="info-b" id="mVendInfo"></div>
+  <div class="fld"><label>Número de acciones a vender</label><input id="vCantidad" type="number" placeholder="1" min="1" step="1" oninput="calcVentaAcc()"></div>
+  <div class="info-b" id="vCalc" style="display:none"></div>
+  <div class="fld"><label>Método de cobro</label><select id="vMetodo"><option value="usdt">🪙 USDT BEP-20</option><option value="banco">🏦 Transferencia bancaria</option></select></div>
+  <div class="fld"><label>Wallet BEP-20 o datos bancarios</label><input id="vDestino" type="text" placeholder="0x... o banco/cuenta/titular"></div>
+  <div class="fld"><label>PIN de retiro</label><input id="vPin" type="password" inputmode="numeric" maxlength="4" placeholder="••••"></div>
+  <button class="btn red" onclick="confirmarVentaAcc()">💰 Solicitar venta</button>
+</div>
+</div>
+
+<!-- MODAL CHAT -->
+<div class="mover" id="mChat">
+<div class="modal">
+  <button class="m-close" onclick="closeM('mChat')">✕</button>
+  <div class="m-handle"></div>
+  <div class="m-ttl">✉️ Mensaje al equipo</div>
+  <div class="okmsg" id="okChat"></div>
+  <div class="fld"><label>Tu mensaje</label><textarea id="chatMsg" rows="4" placeholder="Escribe tu consulta..."></textarea></div>
+  <button class="btn" onclick="sendChat()">Enviar mensaje</button>
+</div>
+</div>
+
+<!-- MODAL ADMIN PIN -->
+<div class="mover" id="mAdminPin">
+<div class="modal" style="padding-bottom:2rem">
+  <div class="m-handle"></div>
+  <div class="m-ttl">🔐 Acceso Admin</div>
+  <div class="errmsg" id="eAdminPin"></div>
+  <div class="fld"><label>PIN</label><input id="adminPinIn" type="password" inputmode="numeric" maxlength="6" placeholder="••••••"></div>
+  <button class="btn" onclick="checkAdminPin()">Entrar</button>
+</div>
+</div>
+
+<!-- MODAL ADMIN -->
+<div class="mover" id="mAdmin">
+<div class="modal">
+  <button class="m-close" onclick="closeM('mAdmin')">✕</button>
+  <div class="m-handle"></div>
+  <div class="m-ttl">⚙️ Panel Admin</div>
+  <div class="admin-tabs">
+    <button class="atab on" onclick="atab('stats',this)">📊</button>
+    <button class="atab" onclick="atab('ops',this)">🤖Bot</button>
+    <button class="atab" onclick="atab('gan',this)">📈PnL</button>
+    <button class="atab" onclick="atab('acc',this)">💼Acc.</button>
+    <button class="atab" onclick="atab('news',this)">📰News</button>
+    <button class="atab" onclick="atab('dep',this)">💰Dep.</button>
+    <button class="atab" onclick="atab('ret',this)">💸Ret.</button>
+    <button class="atab" onclick="atab('usr',this)">👤</button>
+    <button class="atab" onclick="atab('trades',this)">📸</button>
+    <button class="atab" onclick="atab('cfg',this)">⚙️</button>
+  </div>
+
+  <!-- Stats -->
+  <div id="ad-stats" class="ad-sec">
+    <div class="admin-stat"><span class="admin-stat-lbl">👤 Usuarios</span><span class="admin-stat-val" id="adTotalUsers">0</span></div>
+    <div class="admin-stat"><span class="admin-stat-lbl">🤖 Capital Bot</span><span class="admin-stat-val" id="adCapBot">$0</span></div>
+    <div class="admin-stat"><span class="admin-stat-lbl">💼 Capital Acciones</span><span class="admin-stat-val" id="adCapAcc">$0</span></div>
+    <div class="admin-stat"><span class="admin-stat-lbl">📈 Ganancias Bot</span><span class="admin-stat-val" id="adGanTotal">$0</span></div>
+    <div class="admin-stat"><span class="admin-stat-lbl">💸 Dep. pendientes</span><span class="admin-stat-val" id="adDepPend">0</span></div>
+    <div class="admin-stat"><span class="admin-stat-lbl">⬇️ Ret. pendientes</span><span class="admin-stat-val" id="adRetPend">0</span></div>
+    <div class="admin-stat"><span class="admin-stat-lbl">✉️ Mensajes</span><span class="admin-stat-val" id="adMsgCount">0</span></div>
+  </div>
+
+  <!-- BOT OPS -->
+  <div id="ad-ops" class="ad-sec" style="display:none">
+    <div class="info-b blue">Registra cada operación. El capital usado se bloqueará hasta que cierre.</div>
+    <div class="fld"><label>Estrategia</label><select id="adStrategy"><option>GRID-SCAL SOLANA</option><option>GRID-SCAL ETH</option><option>GRID-SCAL BTC</option><option>GRID-SCAL XRP</option><option>GRID-SCAL TRX</option><option>GRID-SCAL POL</option><option>GRID BOT COMPUESTO SOL</option></select></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.42rem">
+      <div class="fld"><label>Entry</label><input id="adEntry" type="number" placeholder="82.00" step="0.01"></div>
+      <div class="fld"><label>TP precio</label><input id="adTp" type="number" placeholder="83.23" step="0.01"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.42rem">
+      <div class="fld"><label>TP % (0–1.5)</label><input id="adTpPct" type="number" placeholder="0.75" step="0.01" min="0" max="1.5"></div>
+      <div class="fld"><label>% del capital total usado (ej: 30 = 30%)</label><input id="adCapUsado" type="number" placeholder="30" step="1" min="1" max="100"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.42rem">
+      <div class="fld"><label>Fecha apertura</label><input id="adOpenDate" type="date"></div>
+      <div class="fld"><label>Hora apertura</label><input id="adOpenTime" type="time"></div>
+    </div>
+    <div class="fld"><label>Estado</label>
+      <select id="adOpStatus" onchange="$('adCloseFields').style.display=this.value==='closed'?'block':'none'">
+        <option value="open">🟢 Abierta</option><option value="closed">✅ Cerrada</option>
+      </select>
+    </div>
+    <div id="adCloseFields" style="display:none">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.42rem">
+        <div class="fld"><label>Fecha cierre</label><input id="adCloseDate" type="date"></div>
+        <div class="fld"><label>Hora cierre</label><input id="adCloseTime" type="time"></div>
+      </div>
+    </div>
+    <button class="btn green" onclick="addOp()">➕ Agregar operación</button>
+    <div class="okmsg" id="okOp"></div>
+    <div class="divider"></div>
+    <div id="adOpsList"></div>
+  </div>
+
+  <!-- PnL -->
+  <div id="ad-gan" class="ad-sec" style="display:none">
+    <!-- PnL DIARIO DIRECTO -->
+    <div style="background:linear-gradient(135deg,rgba(46,204,113,0.08),rgba(212,168,67,0.05));border:1px solid rgba(46,204,113,0.25);border-radius:13px;padding:0.85rem;margin-bottom:0.75rem">
+      <div style="font-size:0.7rem;color:var(--green);font-weight:800;text-transform:uppercase;margin-bottom:0.55rem">💰 Registrar PnL Diario (Ganancia del día)</div>
+      <div class="info-b" style="font-size:0.65rem;margin-bottom:0.45rem">Ingresa el TP % del día y el sistema calcula y distribuye automáticamente la ganancia proporcional de cada inversor.</div>
+      <div class="fld"><label>TP del día (%)</label><input id="pnlDiaPct" type="number" placeholder="Ej: 0.75" min="0" max="5" step="0.01" oninput="calcPnlDiaPreview()"></div>
+      <div id="pnlDiaPreview" style="display:none;background:rgba(0,0,0,0.2);border-radius:9px;padding:0.52rem;margin-bottom:0.42rem;font-size:0.65rem;color:var(--green)"></div>
+      <div class="fld"><label>Nota del día</label><input id="pnlDiaNota" type="text" placeholder="Ej: Cierre del día · 3 ops SOL/ETH/BTC"></div>
+      <button class="btn green" onclick="registrarPnlDiario()">💰 Registrar y distribuir PnL del día</button>
+      <div class="okmsg" id="okPnlDia"></div>
+    </div>
+
+    <div class="divider"></div>
+    <div style="font-size:0.7rem;color:var(--gold);font-weight:700;text-transform:uppercase;margin-bottom:0.42rem">📊 Cerrar operación individual</div>
+    <div class="info-b">Registra la ganancia de cada operación cerrada. Se acumula al día sin borrar anteriores.</div>
+    <div class="fld"><label>Operación a cerrar</label><select id="adGanStrategy" onchange="precargarCapOp(this.value)"><option value="">-- Selecciona op abierta --</option></select><div id="adGanStrategyHint" style="font-size:0.62rem;color:var(--muted);margin-top:0.25rem"></div></div>
+    <div class="fld"><label>% ganancia (0–1.5)</label><input id="adPct" type="number" placeholder="0.75" min="0" max="1.5" step="0.01"></div>
+    <div class="fld"><label>Nota (fecha/hora cierre, precio TP)</label><input id="adNote" type="text" placeholder="Ej: SOL TP 83.20 · 14:35 · 01/06/2026"></div>
+    <button class="btn" onclick="applyGanancia()">✅ Registrar ganancia</button>
+    <div class="okmsg" id="okGan"></div>
+    <div class="divider"></div>
+    <div id="ganHist"></div>
+  </div>
+
+  <!-- ACCIONES ADMIN -->
+  <div id="ad-acc" class="ad-sec" style="display:none">
+    <!-- Agregar/editar acción del catálogo -->
+    <div class="info-b blue" style="margin-bottom:0.45rem">Gestiona el catálogo de acciones y precios. También aprueba compras/ventas y abona dividendos.</div>
+
+    <div style="font-size:0.7rem;color:var(--gold);text-transform:uppercase;margin-bottom:0.42rem;font-weight:700">📋 Agregar / Editar Acción</div>
+    <div class="fld"><label>Ticker (ej: AAPL)</label><input id="accTicker" type="text" placeholder="AAPL" style="text-transform:uppercase"></div>
+    <div class="fld"><label>Nombre de la empresa</label><input id="accNombre" type="text" placeholder="Apple Inc."></div>
+    <div class="fld"><label>Logo (emoji)</label><input id="accLogo" type="text" placeholder="🍎"></div>
+    <div class="fld"><label>Precio actual (USD)</label><input id="accPrecio" type="number" placeholder="189.50" step="0.01"></div>
+    <div class="fld"><label>Cambio % hoy</label><input id="accChg" type="number" placeholder="+1.25" step="0.01"></div>
+    <div class="fld"><label>Descripción completa</label><textarea id="accDesc" rows="3" placeholder="Descripción de la empresa..."></textarea></div>
+    <div class="fld"><label>Dividendo info</label><input id="accDiv" type="text" placeholder="Ej: $0.25/acción trimestral"></div>
+    <button class="btn green" onclick="guardarAccionCatalogo()">💾 Guardar acción</button>
+    <div class="okmsg" id="okAccCat"></div>
+
+    <div class="divider"></div>
+    <div style="font-size:0.7rem;color:var(--gold);text-transform:uppercase;margin-bottom:0.42rem;font-weight:700">📊 Actualizar precios</div>
+    <div id="accPreciosList"></div>
+
+    <div class="divider"></div>
+    <div style="font-size:0.7rem;color:var(--gold);text-transform:uppercase;margin-bottom:0.42rem;font-weight:700">🛒 Solicitudes compra pendientes</div>
+    <div id="pendAccCompras"><div class="empty" style="padding:0.4rem">Sin solicitudes</div></div>
+
+    <div class="divider"></div>
+    <div style="font-size:0.7rem;color:var(--gold);text-transform:uppercase;margin-bottom:0.42rem;font-weight:700">📤 Solicitudes venta pendientes</div>
+    <div id="pendAccVentas"><div class="empty" style="padding:0.4rem">Sin solicitudes</div></div>
+
+    <div class="divider"></div>
+    <div style="font-size:0.7rem;color:var(--gold);text-transform:uppercase;margin-bottom:0.42rem;font-weight:700">💰 Abonar dividendo</div>
+    <div class="fld"><label>Ticker</label><input id="divTicker" type="text" placeholder="AAPL"></div>
+    <div class="fld"><label>Dividendo por acción (USD)</label><input id="divPorAccion" type="number" placeholder="0.25" step="0.01"></div>
+    <div class="fld"><label>Nota</label><input id="divNota" type="text" placeholder="Dividendo Q2 2026"></div>
+    <button class="btn green" onclick="abonarDividendo()">💰 Abonar dividendo</button>
+    <div class="okmsg" id="okDiv"></div>
+  </div>
+
+  <!-- NOTICIAS ADMIN -->
+  <div id="ad-news" class="ad-sec" style="display:none">
+    <div class="info-b blue">Agrega noticias del día. Se mostrarán a todos los usuarios con la fecha de hoy.</div>
+    <div class="fld"><label>Fuente (ej: CoinDesk)</label><input id="newsFuente" type="text" placeholder="CoinDesk"></div>
+    <div class="fld"><label>Título de la noticia</label><input id="newsTitulo" type="text" placeholder="Bitcoin supera los $100K..."></div>
+    <div class="fld"><label>Resumen</label><textarea id="newsResumen" rows="3" placeholder="El mercado cripto experimenta..."></textarea></div>
+    <div class="fld"><label>Categoría</label><input id="newsCat" type="text" placeholder="BTC / ETH / SOL / Macro..."></div>
+    <button class="btn green" onclick="agregarNoticia()">➕ Publicar noticia</button>
+    <div class="okmsg" id="okNews"></div>
+    <div class="divider"></div>
+    <div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.42rem;text-transform:uppercase">Noticias publicadas hoy</div>
+    <div id="adminNewsList"></div>
+  </div>
+
+  <!-- DEPOSITOS -->
+  <div id="ad-dep" class="ad-sec" style="display:none">
+    <div class="info-b">Confirma el depósito para activar el saldo del usuario.</div>
+    <div id="pendDeps"><div class="empty">Sin depósitos pendientes</div></div>
+  </div>
+
+  <!-- RETIROS -->
+  <div id="ad-ret" class="ad-sec" style="display:none">
+    <div id="pendRets"><div class="empty">Sin retiros pendientes</div></div>
+  </div>
+
+  <!-- USUARIOS -->
+  <div id="ad-usr" class="ad-sec" style="display:none"><div id="userList"></div></div>
+
+  <!-- TRADES FOTOS -->
+  <div id="ad-trades" class="ad-sec" style="display:none">
+    <div class="fld"><label>URL de imagen</label><input id="tradeUrl" type="url" placeholder="https://..."></div>
+    <div class="fld"><label>Descripción</label><input id="tradeDesc" type="text" placeholder="GRID SOL TP +0.75%"></div>
+    <button class="btn green" onclick="addTrade()">➕ Agregar captura</button>
+    <div class="okmsg" id="okTrade"></div>
+    <div class="divider"></div>
+    <div id="adTradesList"></div>
+  </div>
+
+  <!-- CONFIG -->
+  <div id="ad-cfg" class="ad-sec" style="display:none">
+    <div class="fld"><label>PIN de administrador</label><input id="cfgPin" type="password" inputmode="numeric" maxlength="6" placeholder="Mín. 4 dígitos"></div>
+    <div class="fld"><label>Frase motivacional del día</label><input id="cfgFrase" type="text" placeholder="La constancia es la madre de la fortuna."></div>
+    <button class="btn" onclick="saveConfig()">Guardar</button>
+    <div class="okmsg" id="okCfg"></div>
+    <div class="divider"></div>
+    <div style="font-size:0.7rem;color:var(--gold);text-transform:uppercase;margin-bottom:0.42rem;font-weight:700">🔗 Gestión de Referidos</div>
+    <div class="info-b" style="margin-bottom:0.45rem">Si hay usuarios con referidos marcados como "PENDIENTE" (registrados antes de que Firebase cargara), usa este botón para vincularlos correctamente.</div>
+    <button class="btn blue" onclick="resolverRefsPendientes()" style="margin-bottom:0.75rem">🔗 Resolver Referidos Pendientes</button>
+    <div class="divider"></div>
+    <div style="font-size:0.68rem;color:var(--muted);margin-bottom:0.38rem;text-transform:uppercase">Mensajes de soporte</div>
+    <div id="supportMsgs"><div class="empty">Sin mensajes</div></div>
+  </div>
+</div>
+</div>
+
+<script>
+// ══════════════════════════════════
+// CONSTANTES
+// ══════════════════════════════════
+const WALLET='0x781eeb70f78030ec9e32a8a78b8e509b57365998';
+const DEFAULT_PIN='000000';
+const COM_BOT=3, COM_ACC_PCT=0.02, IMP_VENTA=0.015, REF_ACC_PCT=0.02;
+const FRASES=['💎 La constancia construye resultados.','🚀 Tu capital trabaja mientras disfrutas tu día.','⚡ La disciplina supera a la emoción.','🌱 Cada operación forma parte de una estrategia.','🏆 Cada USDT es un paso hacia tu libertad.','🔥 El bot nunca duerme, tu dinero tampoco.','✨ La paciencia es la mejor estrategia.','📈 Los mercados recompensan a los constantes.','🌙 Mientras duermes, tu capital crece.','💡 Invertir hoy es un regalo para tu futuro yo.','🎯 El éxito financiero es un maratón, no un sprint.','🌊 Las olas del mercado nos impulsan, no nos detienen.','🦁 El inversor valiente no teme la volatilidad.','💫 Pequeños pasos diarios construyen grandes riquezas.','🌟 Confía en el proceso, los resultados llegarán.'];
+
+// CATÁLOGO BASE (se puede ampliar desde admin)
+const ACC_BASE=[
+  {ticker:'AAPL',nombre:'Apple Inc.',logo:'🍎',bg:'#1a1a2e',precio:189.5,chg:0.45,desc:'Apple es la empresa más valiosa del mundo. Creadora del iPhone, Mac, iPad y un ecosistema de servicios digitales que genera más de $380 mil millones anuales. Tiene la base de clientes más leal del planeta tecnológico, con más de 2,000 millones de dispositivos activos. Su modelo de negocio combina hardware premium con servicios de alta rentabilidad como App Store, iCloud, Apple Music y Apple Pay.',divInfo:'💰 Dividendo: $0.25/acción trimestral · Historial: 40+ años pagando'},
+  {ticker:'MSFT',nombre:'Microsoft',logo:'🪟',bg:'#0a1a2a',precio:422.3,chg:0.32,desc:'Microsoft es el gigante del software empresarial. Dueña de Windows, Azure (la nube más usada por empresas), LinkedIn, GitHub y el 49% de OpenAI. Azure es su motor de crecimiento principal con más del 30% del mercado cloud global. Una de las inversiones más sólidas y estables del S&P 500 con dividendos crecientes por más de 20 años consecutivos.',divInfo:'💰 Dividendo: $0.75/acción trimestral · Aristócrata del dividendo'},
+  {ticker:'KO',nombre:'Coca-Cola Co.',logo:'🥤',bg:'#2a0a0a',precio:63.2,chg:-0.15,desc:'Coca-Cola es la marca más reconocida del mundo, presente en más de 200 países. No solo vende bebidas: es un modelo de negocio de franquicias y distribución global que genera flujo de caja predecible año tras año. Empresa socialmente responsable con programas de sostenibilidad. Ha pagado dividendos crecientes por más de 60 años consecutivos, siendo un pilar de los portafolios de inversión conservadora.',divInfo:'💰 Dividendo: $0.485/acción trimestral · 60+ años aumentando dividendo'},
+  {ticker:'JNJ',nombre:'Johnson & Johnson',logo:'🏥',bg:'#0a1a1a',precio:147.8,chg:0.28,desc:'Johnson & Johnson es una de las empresas farmacéuticas y de cuidado personal más grandes del mundo. Opera en tres segmentos: medicamentos innovadores, dispositivos médicos y productos de consumo (Band-Aid, Tylenol, Neutrogena). Reconocida mundialmente por su ética corporativa y su compromiso con la salud global. Ha aumentado su dividendo por más de 60 años consecutivos, siendo un referente de inversión defensiva.',divInfo:'💰 Dividendo: $1.19/acción trimestral · 60+ años de aumento consecutivo'},
+  {ticker:'MCD',nombre:"McDonald's Corp.",logo:'🍔',bg:'#1a1400',precio:295.4,chg:0.18,desc:"McDonald's es la cadena de restaurantes de comida rápida más grande del mundo con más de 40,000 locales en 100+ países. Su modelo de negocio está basado principalmente en franquicias, lo que genera ingresos estables de regalías y arriendos sin asumir los costos operativos directos. Es considerada una empresa de bienes raíces tanto como de alimentos. Pagadora consistente de dividendos con más de 45 años de aumentos consecutivos.",divInfo:'💰 Dividendo: $1.67/acción trimestral · 45+ años de aumento'},
+  {ticker:'MELI',nombre:'MercadoLibre',logo:'🛍️',bg:'#001a10',precio:2180,chg:1.25,desc:'MercadoLibre es el Amazon de América Latina. Domina el comercio electrónico y el fintech en la región con presencia en 18 países. MercadoPago, su plataforma de pagos digitales, es el mayor procesador de pagos online de Latinoamérica. Atiende a más de 100 millones de usuarios activos y crece a doble dígito anualmente, aprovechando la baja bancarización de la región como oportunidad de expansión.',divInfo:'📊 Sin dividendo · Reinvierte todo en crecimiento y expansión'},
+  {ticker:'NVDA',nombre:'NVIDIA Corp.',logo:'💚',bg:'#0a2a1a',precio:875,chg:2.35,desc:'NVIDIA es el líder absoluto en chips de inteligencia artificial. Sus GPUs son el cerebro detrás de ChatGPT, los data centers de Google, Amazon, Microsoft y Tesla. La demanda de sus chips H100 y Blackwell supera ampliamente la oferta disponible. La explosión de la IA generativa ha convertido a NVIDIA en la empresa más valiosa del sector tecnológico, con crecimientos de ingresos superiores al 200% anual.',divInfo:'💰 Dividendo: $0.01/acción trimestral · Empresa en fase de alto crecimiento'},
+  {ticker:'TSLA',nombre:'Tesla Inc.',logo:'⚡',bg:'#1a1a0a',precio:248,chg:-0.85,desc:'Tesla es el pionero y líder de los vehículos eléctricos. Liderada por Elon Musk, la empresa no es solo autos: también desarrolla paneles solares, baterías Powerwall para hogares, robots humanoides (Optimus) y el sistema de conducción autónoma Full Self-Driving. Su red de Superchargers es el estándar de carga rápida en EE.UU. Alta volatilidad con enorme potencial de crecimiento a largo plazo.',divInfo:'📊 Sin dividendo · Reinvierte en I+D y expansión global'},
+  {ticker:'GOOGL',nombre:'Alphabet (Google)',logo:'🔍',bg:'#0a0a1a',precio:174,chg:0.65,desc:'Alphabet es la empresa madre de Google, YouTube, Google Cloud y DeepMind. Controla el 92% de las búsquedas en internet a nivel mundial y genera más de $280 mil millones anuales en publicidad digital. Google Cloud crece más del 25% anual y se posiciona como competidor serio de AWS y Azure. DeepMind es uno de los laboratorios de IA más avanzados del mundo, con logros en medicina, ciencias y videojuegos.',divInfo:'💰 Dividendo: $0.20/acción trimestral · Comenzó a pagar dividendos en 2024'},
+  {ticker:'META',nombre:'Meta Platforms',logo:'👾',bg:'#1a0a1a',precio:498,chg:1.05,desc:"Meta Platforms es la propietaria de Facebook, Instagram y WhatsApp, las tres plataformas sociales más grandes del mundo con más de 3,000 millones de usuarios activos. Es el líder indiscutido en publicidad digital social. Invierte masivamente en inteligencia artificial y en el metaverso (Reality Labs). Su dominio en publicidad mobile y la integración de IA en sus plataformas fortalece su posición competitiva a largo plazo.",divInfo:'📊 Sin dividendo · Reinvierte masivamente en IA y metaverso'},
+  {ticker:'SPY',nombre:'S&P 500 ETF',logo:'📊',bg:'#0a1a0a',precio:538,chg:0.22,desc:'El SPY es el ETF (fondo cotizado) más grande y líquido del mundo. Replica el índice S&P 500 que incluye las 500 empresas más grandes de Estados Unidos: Apple, Microsoft, Amazon, Google, Berkshire Hathaway y más. Con una sola compra obtienes exposición diversificada a toda la economía estadounidense. Históricamente ha generado un rendimiento promedio del 10-11% anual en los últimos 30 años.',divInfo:'💰 Dividendo: ~$1.55/unidad trimestral · Dividendos de las 500 empresas'},
+];
+
+// ══════════════════════════════════
+// DB
+// ══════════════════════════════════
+function loadDB(){
+  const def={
+    users:[],investments:[],transactions:[],ganancias:[],botOps:[],
+    trades:[],supportMsgs:[],
+    stockCatalog:JSON.parse(JSON.stringify(ACC_BASE)), // catálogo editable
+    stockPositions:[],
+    noticias:[], // noticias agregadas por admin
+    pnlDiario:[], // registros de PnL diario
+    config:{adminPin:DEFAULT_PIN,frase:'',fraseDate:''}
+  };
+  try{ return JSON.parse(localStorage.getItem('sgh_v11')||JSON.stringify(def)); }
+  catch(e){ return def; }
+}
+function saveDB(d){
+  // Sincronizar con Firebase (asíncrono, no bloquea la UI)
+  if(window._firebaseSave) {
+    window._firebaseSave(d).catch(e=>console.warn('Firebase sync error:',e));
+  }
+}
+
+let UID=null, retMode='usdt', accSelIdx=-1, accVendPos=null, stockTabMode='port';
+// Restaurar sesión guardada
+(function restoreSession(){
+  try {
+    const savedUID = localStorage.getItem('sgh_uid');
+    if(savedUID){
+      const db = JSON.parse(localStorage.getItem('sgh_v11')||'{}');
+      const u = (db.users||[]).find(u=>u.id===savedUID);
+      if(u){ 
+        // Esperar a que el DOM esté listo
+        window.addEventListener('DOMContentLoaded', function(){
+          UID = savedUID;
+          enterDash(u);
+        });
+      }
+    }
+  } catch(e){}
+})();
+// Exponer UID globalmente para el listener de Firebase
+Object.defineProperty(window, '_SGH_UID', { get: ()=>UID });
+const $=id=>document.getElementById(id);
+function fmt(n){ return '$'+parseFloat(n||0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,','); }
+function r2(n){ return Math.round(n*100)/100; }
+function r4(n){ return Math.round(n*10000)/10000; }
+function dtStr(){ return new Date().toLocaleString('es-MX',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); }
+function dateStr(){ return new Date().toISOString().slice(0,10); }
+function todayLabel(){ return new Date().toLocaleDateString('es-MX',{weekday:'long',day:'numeric',month:'long',year:'numeric'}); }
+function showErr(id,m){ const e=$(id);if(!e)return;e.textContent=m;e.style.display=m?'block':'none'; }
+function showOk(id,m){ const e=$(id);if(!e)return;e.textContent=m;e.style.display=m?'block':'none'; }
+
+// ── RELOJ ──
+function tick(){ const ht=$('hTime');if(ht) ht.textContent=new Date().toLocaleString('es-MX',{weekday:'short',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}); }
+setInterval(tick,1000); tick();
+
+// ── FRASE DEL DÍA ──
+function setFrase(){
+  const db=loadDB(),hoy=dateStr();
+  if(db.config.frase&&db.config.fraseDate===hoy){ $('fraseTxt').textContent=db.config.frase; return; }
+  const d=Math.floor((new Date()-new Date(new Date().getFullYear(),0,0))/86400000);
+  $('fraseTxt').textContent=FRASES[d%FRASES.length];
+}
+
+// ── PRECIOS CRIPTO ──
+async function fetchCryptoPrices(){
+  try{
+    const r=await fetch('https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT","TRXUSDT","MATICUSDT","POLUSDT"]');
+    const data=await r.json();
+    const map={BTCUSDT:'btc',ETHUSDT:'eth',SOLUSDT:'sol',XRPUSDT:'xrp',TRXUSDT:'trx',MATICUSDT:'matic',POLUSDT:'pol'};
+    data.forEach(d=>{
+      const p=parseFloat(d.lastPrice),chg=parseFloat(d.priceChangePercent),sym=map[d.symbol];if(!sym)return;
+      const pe=$(sym+'Price'),ce=$(sym+'Chg');
+      if(pe) pe.textContent=p>100?'$'+Math.round(p).toLocaleString():p>1?'$'+p.toFixed(2):'$'+p.toFixed(4);
+      if(ce){ ce.textContent=(chg>=0?'+':'')+chg.toFixed(2)+'%';ce.className='ct-chg '+(chg>=0?'up':'dn'); }
+    });
+  }catch(e){}
+}
+fetchCryptoPrices(); setInterval(fetchCryptoPrices,10000);
+
+// ── PRECIOS ACCIONES DESDE YAHOO FINANCE ──
+// Solo actualiza la visualización en memoria. NO llama a saveDB para no
+// pisar datos de usuarios/transacciones en Firebase con cambios de precio.
+async function fetchStockPrices(){
+  const db=loadDB();
+  const cat=db.stockCatalog||[];
+  let updated=false;
+  for(const a of cat){
+    try{
+      const r=await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${a.ticker}?interval=1d&range=1d`,{mode:'cors'});
+      if(!r.ok) continue;
+      const d=await r.json();
+      const price=d?.chart?.result?.[0]?.meta?.regularMarketPrice;
+      const prev=d?.chart?.result?.[0]?.meta?.chartPreviousClose;
+      if(price){
+        a.precio=r2(price);
+        a.chg=prev?r2((price-prev)/prev*100):0;
+        updated=true;
+      }
+    }catch(e){ /* mantiene precio del catálogo */ }
+  }
+  // Solo actualizar localStorage con los precios nuevos (sin tocar Firebase)
+  if(updated){
+    try{
+      const localRaw=localStorage.getItem('sgh_v11');
+      if(localRaw){
+        const localDb=JSON.parse(localRaw);
+        localDb.stockCatalog=cat;
+        localStorage.setItem('sgh_v11',JSON.stringify(localDb));
+      }
+    }catch(e){}
+  }
+  if(UID) renderStocks();
+}
+fetchStockPrices(); setInterval(fetchStockPrices,120000); // cada 2 min
+
+// ── HISTORIAL GANANCIAS ──
+let _filtGan = 'dia';
+function filtrarGanancias(periodo){
+  _filtGan = periodo;
+  ['filtDia','filtSem','filtMes','filtTodo'].forEach(id=>{
+    const el=$(id); if(el) el.classList.remove('selected');
+  });
+  const map={dia:'filtDia',semana:'filtSem',mes:'filtMes',todo:'filtTodo'};
+  const el=$(map[periodo]); if(el) el.classList.add('selected');
+  renderHistorialGanancias(); updateV9Stats(); updateV9Stats();
+}
+
+function renderHistorialGanancias(){
+  const db=loadDB();
+  if(!UID) return;
+  const u=db.users.find(u=>u.id===UID);
+  if(!u) return;
+  
+  const hoy=new Date();
+  const hoyStr=dateStr();
+  
+  // Filtrar operaciones según período
+  const ops=(db.botOps||[]).filter(op=>op.status==='closed');
+  let opsFiltradas=ops;
+  
+  if(_filtGan==='dia'){
+    opsFiltradas=ops.filter(op=>op.closeDate===hoyStr || op.openDate===hoyStr);
+  } else if(_filtGan==='semana'){
+    const hace7=new Date(hoy); hace7.setDate(hoy.getDate()-7);
+    opsFiltradas=ops.filter(op=>{
+      const d=op.closeDate||op.openDate;
+      return d && new Date(d)>=hace7;
+    });
+  } else if(_filtGan==='mes'){
+    const hace30=new Date(hoy); hace30.setDate(hoy.getDate()-30);
+    opsFiltradas=ops.filter(op=>{
+      const d=op.closeDate||op.openDate;
+      return d && new Date(d)>=hace30;
+    });
+  }
+
+  const refs=(db.users||[]).filter(u=>u.refBy===UID).length;
+  const pctUser=refs>0?0.75:0.50;
+
+  // Calcular ganancias por operación: capUsado fijo × pct% × ganPct (solo si el usuario calificó)
+  // El usuario calificó si tenía capital disponible >= capUsado de esa op
+  // Para simplicidad en el historial, mostramos la ganancia que recibió desde las transacciones reales
+  let totalBruto=0, totalNeto=0;
+  const items=opsFiltradas.map(op=>{
+    const pct=parseFloat(op.tpPct||0)/100;
+    const capUsadoOp=parseFloat(op.capUsado||0);
+    const ganBruta=r2(capUsadoOp*pct); // ganancia bruta fija de la op
+    const ganNeta=r2(ganBruta*pctUser);
+    // Verificar si el usuario realmente recibió ganancia de esta op (buscando en transacciones)
+    const txOp=(db.transactions||[]).find(t=>t.uid===UID&&t.type==='ganancia'&&t.ganData&&t.ganData.capUsado===capUsadoOp&&Math.abs(t.amount-ganNeta)<0.01);
+    const participó=txOp!=null||(capUsadoOp>0); // mostrar siempre en historial de ops del bot
+    totalBruto+=ganBruta;
+    totalNeto+=ganNeta;
+    return {op,capOp:capUsadoOp,ganBruta,ganNeta,pct,participó};
+  });
+
+  const el=$('resumenGanancias');
+  if(!el) return;
+
+  const periodoLabel={dia:'Hoy',semana:'Esta semana',mes:'Este mes',todo:'Total histórico'};
+  
+  let html2=`
+    <div class="resumen-card">
+      <div style="font-size:0.65rem;color:var(--gold2);font-weight:700;text-transform:uppercase;margin-bottom:0.38rem">${periodoLabel[_filtGan]}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.38rem">
+        <div><div style="font-size:0.6rem;color:var(--muted)">Ganancia bruta</div><div style="font-size:1rem;font-weight:800;color:var(--green)">$${totalBruto.toFixed(2)}</div></div>
+        <div><div style="font-size:0.6rem;color:var(--muted)">Tu parte (${(pctUser*100).toFixed(0)}%)</div><div style="font-size:1rem;font-weight:800;color:var(--gold2)">$${totalNeto.toFixed(2)}</div></div>
+      </div>
+      <div style="font-size:0.6rem;color:var(--muted);margin-top:0.28rem">${items.length} operación(es) cerrada(s)</div>
+    </div>`;
+
+  if(items.length===0){
+    html2+='<div class="empty">Sin operaciones en este período</div>';
+  } else {
+    items.slice().reverse().forEach(({op,capOp,ganBruta,ganNeta,pct})=>{
+      html2+=`
+        <div class="hist-card">
+          <div class="hist-row">
+            <span style="font-size:0.72rem;font-weight:700;color:var(--gold2)">${op.strategy||'—'}</span>
+            <span style="font-size:0.65rem;color:var(--green);font-weight:700">+$${ganNeta.toFixed(2)}</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.25rem;margin-top:0.22rem">
+            <div><div class="hist-lbl">Entrada</div><div class="hist-val">$${parseFloat(op.entry||0).toFixed(4)}</div></div>
+            <div><div class="hist-lbl">TP precio</div><div class="hist-val">$${parseFloat(op.tp||0).toFixed(4)}</div></div>
+            <div><div class="hist-lbl">% ganancia</div><div class="hist-val" style="color:var(--green)">${parseFloat(op.tpPct||0).toFixed(2)}%</div></div>
+            <div><div class="hist-lbl">Capital usado</div><div class="hist-val">$${capOp.toFixed(2)}</div></div>
+            <div><div class="hist-lbl">Ganancia bruta</div><div class="hist-val">$${ganBruta.toFixed(2)}</div></div>
+            <div><div class="hist-lbl">Tu ganancia (${(pctUser*100).toFixed(0)}%)</div><div class="hist-val" style="color:var(--gold2)">$${ganNeta.toFixed(2)}</div></div>
+          </div>
+          <div style="font-size:0.58rem;color:var(--muted);margin-top:0.22rem">📅 ${op.closeDate||op.openDate||'—'} ${op.closeTime||op.openTime||''}</div>
+        </div>`;
+    });
+  }
+  el.innerHTML=html2;
+
+  // ── RESUMEN DEL DÍA (tab ganancias) ──
+  try {
+    const opsAbiertas = (db.botOps||[]).filter(o=>o.status==='open');
+    const capOperando = opsAbiertas.reduce((s,o)=>s+parseFloat(o.capUsado||0),0);
+    const refs=(db.users||[]).filter(u=>u.refBy===UID).length;
+    const pctUser=refs>0?0.75:0.50;
+
+    // Ganancia realizada hoy
+    const hoyStr = dateStr();
+    const opsCerradasHoy = (db.botOps||[]).filter(o=>o.status==='closed'&&(o.closeDate===hoyStr||o.openDate===hoyStr));
+    const ganHoy = opsCerradasHoy.reduce((s,o)=>s+r2(parseFloat(o.capUsado||0)*(parseFloat(o.tpPct||0)/100)*pctUser),0);
+
+    // Flotante estimado (capital en riesgo mientras ops abiertas)
+    const flotante = capOperando * -0.015; // conservador ~1.5% abajo del entry
+
+    const rdG=$('rdGanancia'),rdF=$('rdFlotante'),rdO=$('rdOpsAbiertas'),rdC=$('rdCapUsado'),rdD=$('rdOpsDetalle');
+    if(rdG){ rdG.textContent='+'+fmt(ganHoy); rdG.style.color=ganHoy>0?'var(--green)':'var(--muted)'; }
+    if(rdF){ rdF.textContent=capOperando>0?fmt(flotante):'$0.00'; rdF.style.color=capOperando>0?'var(--red)':'var(--muted)'; }
+    if(rdO) rdO.textContent=opsAbiertas.length;
+    if(rdC) rdC.textContent=fmt(capOperando);
+    if(rdD){
+      if(opsAbiertas.length>0){
+        rdD.innerHTML=opsAbiertas.slice(0,4).map(o=>`
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:0.22rem 0;border-bottom:1px solid rgba(255,255,255,0.04);">
+            <span style="color:var(--blue);font-weight:700;">${(o.strategy||'—').replace('GRID-SCAL ','').replace('GRID BOT ','')}</span>
+            <span style="color:var(--gold);">$${parseFloat(o.capUsado||0).toFixed(2)}</span>
+            <span style="color:var(--green);font-size:0.55rem;">TP ${parseFloat(o.tpPct||0).toFixed(2)}%</span>
+          </div>`).join('')+(opsAbiertas.length>4?`<div style="font-size:0.55rem;color:var(--muted);margin-top:0.2rem;">+${opsAbiertas.length-4} más...</div>`:'');
+      } else {
+        rdD.textContent='Sin operaciones abiertas hoy';
+      }
+    }
+  } catch(e){}
+}
+
+// ── PLANES ──
+function selPlan(amt){
+  $('dAmt').value=amt;
+  ['plan50','plan100','plan500','plan1000'].forEach(id=>{
+    const el=$(id); if(el) el.classList.remove('selected');
+  });
+  const el=$('plan'+amt); if(el) el.classList.add('selected');
+}
+function clearPlanSel(){
+  ['plan50','plan100','plan500','plan1000'].forEach(id=>{
+    const el=$(id); if(el) el.classList.remove('selected');
+  });
+}
+
+// ── NOTICIAS ──
+function loadNoticias(){
+  const el=$('newsList'),dl=$('newsDateLabel');
+  if(!el) return;
+  if(dl) dl.textContent=todayLabel();
+  const db=loadDB();
+  // Noticias del admin de hoy
+  const noticiasHoy=(db.noticias||[]).filter(n=>n.dateKey===dateStr()).slice().reverse();
+  // Noticias base rotadas si no hay del admin
+  const NOTICIAS_BASE=[
+    {f:'CoinDesk',t:'Bitcoin mantiene soporte en $100K mientras instituciones acumulan',r:'Los grandes fondos continúan comprando BTC manteniendo el precio sobre los $100,000 pese a la volatilidad de corto plazo.',cat:'BTC'},
+    {f:'CryptoNews',t:'Ethereum finaliza preparativos para su próxima actualización de red',r:'Los desarrolladores confirman mejoras en escalabilidad y reducción de comisiones para el próximo trimestre.',cat:'ETH'},
+    {f:'Bloomberg Crypto',t:'Solana bate récord de transacciones diarias en cadena',r:'La red SOL procesó más de 65 millones de transacciones en 24 horas, superando a ETH y BTC combinados.',cat:'SOL'},
+    {f:'Reuters',t:'Reserva Federal mantiene tasas: impulso positivo para activos de riesgo',r:'La decisión de no subir tasas refuerza el apetito por criptomonedas y acciones tecnológicas globales.',cat:'Macro'},
+    {f:'Decrypt',t:'XRP gana momentum tras resolución parcial del caso SEC-Ripple',r:'Las cortes continúan favoreciendo a Ripple, generando un rally sostenido en XRP con entrada institucional.',cat:'XRP'},
+    {f:'CoinTelegraph',t:'Fondos soberanos acumulan posiciones en SOL y ETH',r:'Datos on-chain muestran acumulación masiva de Solana y Ethereum por fondos de riqueza soberana asiáticos.',cat:'SOL'},
+    {f:'Forbes Crypto',t:'TRON lidera transferencias de USDT a nivel mundial',r:'TRX procesa el 53% de todas las transferencias de stablecoins, consolidando su dominio en pagos cripto.',cat:'TRX'},
+    {f:'CoinGecko',t:'Capitalización cripto supera los $3.8 billones en máximos históricos',r:'El mercado total alcanza nuevos records impulsado por ETFs de Bitcoin y expectativa de tasas más bajas.',cat:'Mercado'},
+  ];
+  const d=Math.floor((new Date()-new Date(new Date().getFullYear(),0,0))/86400000);
+  const rotadas=[...NOTICIAS_BASE.slice(d%NOTICIAS_BASE.length),...NOTICIAS_BASE.slice(0,d%NOTICIAS_BASE.length)];
+  // Admin noticias primero, luego base
+  const todas=[...noticiasHoy.map(n=>({f:n.fuente,t:n.titulo,r:n.resumen,cat:n.cat,isAdmin:true})),...rotadas];
+  el.innerHTML=todas.map(n=>`
+    <div class="noticia-card">
+      <div class="noticia-fuente">${n.f} · <span style="color:var(--blue)">#${n.cat||'Cripto'}</span>${n.isAdmin?'<span class="badge done" style="margin-left:0.3rem">Hoy</span>':''}</div>
+      <div class="noticia-titulo">${n.t}</div>
+      <div class="noticia-resumen">${n.r}</div>
+      <div class="noticia-fecha">📅 ${todayLabel()}</div>
+    </div>`).join('');
+}
+
+// ── REFERIDOS ──
+function getRefFromUrl(){ return new URLSearchParams(window.location.search).get('ref')||''; }
+let pendingRef=getRefFromUrl();
+function checkRefBadge(){
+  if(!pendingRef) return;
+  // Mostrar el badge con el código aunque no se pueda verificar aún
+  // Firebase puede no haber cargado todavía
+  const db=loadDB();
+  const u=db.users.find(u=>u.refCode===pendingRef);
+  if(u){
+    $('refBadge').style.display='block';
+    $('refNombre').textContent=u.name.split(' ')[0];
+  } else {
+    // Aún no hay datos en Firebase: mostrar badge genérico y reintentar
+    $('refBadge').style.display='block';
+    $('refNombre').textContent='un amigo';
+    // Reintentar cuando Firebase esté listo
+    setTimeout(()=>{
+      const db2=loadDB();
+      const u2=db2.users.find(u=>u.refCode===pendingRef);
+      if(u2){ $('refNombre').textContent=u2.name.split(' ')[0]; }
+    }, 3000);
+  }
+}
+function myRefLink(){ return window.location.href.split('?')[0]+'?ref='+UID.slice(-6).toUpperCase(); }
+function copyRefLink(){
+  const link=$('refLink').textContent;
+  navigator.clipboard.writeText(link).catch(()=>{ const t=document.createElement('textarea');t.value=link;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t); });
+  const btn=document.querySelector('.ref-card .copy-btn');
+  const orig=btn.innerHTML;btn.textContent='✅ Copiado!';setTimeout(()=>btn.innerHTML=orig,2000);
+}
+
+// ── AUTH ──
+function tog(r){
+  $('cLogin').style.display=(r===false||r===true&&!r)?'none':'block';
+  if(r===true){ $('cLogin').style.display='none';$('cReg').style.display='block';$('cRec').style.display='none'; checkRefBadge(); }
+  else if(r==='rec'){ $('cLogin').style.display='none';$('cReg').style.display='none';$('cRec').style.display='block'; }
+  else { $('cLogin').style.display='block';$('cReg').style.display='none';$('cRec').style.display='none'; }
+}
+
+// ── RECUPERAR PIN ──
+let recVerificado=false;
+function doRecover(){
+  showErr('eRec','');showOk('okRec','');
+  const phone=$('recPhone').value.trim(),email=$('recEmail').value.trim();
+  if(!phone||!email){ showErr('eRec','Completa todos los campos'); return; }
+  const db=loadDB(),u=db.users.find(u=>u.phone===phone&&u.email===email);
+  if(!u){ showErr('eRec','No encontramos una cuenta con esos datos'); return; }
+  if(!recVerificado){
+    recVerificado=true;
+    $('recNewPinFld').style.display='block';
+    showOk('okRec','✅ Identidad verificada. Ahora ingresa tu nuevo PIN.');
+    return;
+  }
+  const newPin=$('recNewPin').value.trim();
+  if(!newPin||newPin.length<4){ showErr('eRec','PIN debe tener 4 dígitos'); return; }
+  u.pin=newPin; saveDB(db);
+  showOk('okRec','✅ PIN cambiado exitosamente. Ya puedes iniciar sesión.');
+  recVerificado=false;
+  $('recNewPinFld').style.display='none';
+  setTimeout(()=>tog(false),2000);
+}
+
+async function doLogin(){
+  showErr('eLogin','');
+  const phone=$('lPhone').value.trim(),pin=$('lPin').value.trim();
+  if(!phone||!pin){ showErr('eLogin','Completa todos los campos'); return; }
+
+  // Esperar Firebase con datos reales antes de buscar el usuario
+  if(!window._firebaseReady){
+    showErr('eLogin','⏳ Conectando... espera un momento');
+    await new Promise(resolve=>{
+      const prev=window._onFirebaseReady;
+      window._onFirebaseReady=()=>{ if(prev) prev(); resolve(); };
+      setTimeout(resolve, 5000);
+    });
+    showErr('eLogin','');
+  }
+
+  const db=loadDB(),u=db.users.find(u=>u.phone===phone&&u.pin===pin);
+  if(!u){ showErr('eLogin','Teléfono o PIN incorrecto'); return; }
+  UID=u.id; try{localStorage.setItem('sgh_uid',UID);}catch(e){} enterDash(u);
+}
+
+async function doReg(){
+  showErr('eReg','');
+  const name=$('rName').value.trim(),email=$('rEmail').value.trim(),phone=$('rPhone').value.trim();
+  const pin=$('rPin').value.trim(),wpin=$('rWpin').value.trim();
+  if(!name||!email||!phone||!pin||!wpin){ showErr('eReg','Completa todos los campos'); return; }
+  if(pin.length<4||wpin.length<4){ showErr('eReg','PINs de 4 dígitos'); return; }
+  if(pin===wpin){ showErr('eReg','El PIN de retiro debe ser diferente al de acceso'); return; }
+
+  // Esperar Firebase con datos reales antes de registrar
+  if(!window._firebaseReady){
+    showErr('eReg','⏳ Conectando... espera un momento');
+    await new Promise(resolve=>{
+      const prev=window._onFirebaseReady;
+      window._onFirebaseReady=()=>{ if(prev) prev(); resolve(); };
+      setTimeout(resolve, 4000);
+    });
+    showErr('eReg','');
+  }
+
+  const db=loadDB();
+  if(db.users.find(u=>u.phone===phone)){ showErr('eReg','Teléfono ya registrado'); return; }
+  const id='u'+Date.now(), refCode=id.slice(-6).toUpperCase();
+  let refBy=null;
+
+  // Prioridad: 1) código escrito manualmente por el usuario, 2) código en la URL
+  const manualRef=($('rRefCode')&&$('rRefCode').value.trim().toUpperCase())||'';
+  const codigoRef=manualRef||pendingRef;
+
+  if(codigoRef){
+    const ru=db.users.find(u=>u.refCode===codigoRef);
+    if(ru){
+      refBy=ru.id;
+    } else {
+      // Código no encontrado aún: guardarlo como PENDIENTE para que admin lo vincule
+      refBy='PENDIENTE:'+codigoRef;
+    }
+  }
+
+  db.users.push({id,name,email,phone,pin,wpin,refCode,refBy,created:dateStr()});
+  // Intentar resolver referidos PENDIENTES inmediatamente si Firebase ya cargó
+  if(refBy && typeof refBy==='string' && refBy.startsWith('PENDIENTE:')){
+    const codigoPend=refBy.replace('PENDIENTE:','');
+    const referidorReal=db.users.find(u=>u.refCode===codigoPend);
+    if(referidorReal){
+      db.users[db.users.length-1].refBy=referidorReal.id;
+      console.log('✅ Referido resuelto en registro:', name, '→', referidorReal.name);
+    }
+  }
+  saveDB(db);
+  pendingRef=''; // ✅ Limpiar para no afectar registros futuros en la misma sesión
+  UID=id; try{localStorage.setItem('sgh_uid',UID);}catch(e){} enterDash({id,name});
+}
+
+function logout(){ UID=null;try{localStorage.removeItem('sgh_uid');}catch(e){} $('sLogin').classList.add('on');$('sDash').classList.remove('on');$('lPin').value=''; tog(false); }
+
+// Exponer manejadores críticos de login explícitamente para onclick inline.
+Object.assign(window, { tog, doRecover, doLogin, doReg, logout });
+
+function enterDash(u){
+  window._SGH_UID = u.id || UID;
+  $('sLogin').classList.remove('on');$('sDash').classList.add('on');
+  $('uName').textContent=u.name.split(' ')[0];
+  setFrase(); sw('home'); render();
+
+  // Si Firebase aún no ha cargado, esperar y re-renderizar cuando lleguen los datos reales
+  if(!window._firebaseReady){
+    const _prevReady = window._onFirebaseReady;
+    window._onFirebaseReady = function(){
+      if(_prevReady) _prevReady();
+      // Re-renderizar con los datos reales de Firebase
+      setTimeout(()=>{ if(UID){ render(); updateV9Stats(); } }, 200);
+    };
+  } else {
+    // Firebase ya cargó: solo re-renderizar, NUNCA escribir a Firebase al entrar
+    setTimeout(()=>{ if(UID){ render(); updateV9Stats(); } }, 200);
+  }
+}
+
+// ── CÁLCULO BOT ──
+function calcBot(uid){
+  const db=loadDB();
+  const invs=db.investments.filter(i=>i.uid===uid&&i.status==='active');
+  const invested=r2(invs.reduce((s,i)=>s+i.amount,0));
+  const gainsPos=r2(db.transactions.filter(t=>t.uid===uid&&t.type==='ganancia'&&t.amount>0).reduce((s,t)=>s+t.amount,0));
+  const gainsDes=r2(db.transactions.filter(t=>t.uid===uid&&t.type==='ganancia'&&t.amount<0).reduce((s,t)=>s+Math.abs(t.amount),0));
+  const gains=r2(gainsPos-gainsDes);
+  const total=r2(invested+gains);
+  const hoy=dateStr();
+  // Ganancia hoy: primero desde transacciones reales, si es 0 calcula desde ops cerradas hoy
+  let ganHoy=r2(db.transactions.filter(t=>t.uid===uid&&t.type==='ganancia'&&t.amount>0&&(t.dateKey===hoy||(t.date||'').startsWith(hoy))).reduce((s,t)=>s+t.amount,0));
+  if(ganHoy===0){
+    const refs2=db.users.filter(u=>u.refBy&&u.refBy===uid).length;
+    const pct2=refs2>0?0.75:0.50;
+    const opsCerradasHoy=db.botOps.filter(o=>o.status==='closed'&&(o.closeDate===hoy||o.openDate===hoy));
+    ganHoy=r2(opsCerradasHoy.reduce((s,o)=>s+r2(parseFloat(o.capUsado||0)*(parseFloat(o.tpPct||0)/100)*pct2),0));
+  }
+  const refs=db.users.filter(u=>u.refBy&&u.refBy===uid).length;
+  const totalPool=r2(db.investments.filter(i=>i.status==='active').reduce((s,i)=>s+i.amount,0));
+  const ganPct=refs>0?0.75:0.50;
+  // Ops abiertas (todos los días, no solo hoy)
+  const opsAbiertas=db.botOps.filter(o=>o.status==='open'&&!o._deleted);
+  // Capital bloqueado = suma del capUsado de cada op donde este usuario CALIFICA
+  // Un usuario califica en una op si tiene capital disponible acumulado >= capUsado de esa op
+  // Se calculan en orden de apertura para reflejar bloqueos acumulativos
+  let capBloqueado=0;
+  const opsOrdenadas=[...opsAbiertas].sort((a,b)=>a.openDate.localeCompare(b.openDate)||(a.openTime||'').localeCompare(b.openTime||''));
+  opsOrdenadas.forEach(op=>{
+    const cap=parseFloat(op.capUsado||0);
+    const disponibleAntesDeEstaOp=r2(total+gains-capBloqueado); // saldo libre antes de esta op
+    // Solo bloquea si el usuario tiene suficiente capital disponible para entrar
+    if(cap>0 && disponibleAntesDeEstaOp>=cap){
+      capBloqueado=r2(capBloqueado+cap);
+    }
+  });
+  const capDisponible=r2(total-capBloqueado);
+  return {invested,gains,total,invs,ganHoy,refs,totalPool,ganPct,capBloqueado,capDisponible,opsAbiertas};
+}
+
+// ── CÁLCULO ACCIONES ──
+function calcStocks(uid){
+  const db=loadDB();
+  const cat=db.stockCatalog||[];
+  const positions=(db.stockPositions||[]).filter(p=>p.uid===uid&&p.estado==='active');
+  let totalInv=0,totalVal=0;
+  positions.forEach(p=>{
+    const ac=cat.find(a=>a.ticker===p.ticker)||{};
+    const precio=ac.precio||p.precioCompra;
+    totalInv+=r2(p.cantidad*p.precioCompra);
+    totalVal+=r2(p.cantidad*precio);
+  });
+  const divs=r2(db.transactions.filter(t=>t.uid===uid&&t.type==='dividendo'&&t.amount>0).reduce((s,t)=>s+t.amount,0));
+  return {totalInv:r2(totalInv),totalVal:r2(totalVal),pnl:r2(totalVal-totalInv),positions,divs};
+}
+
+
+// ── RENDERIZAR P&L DIARIO ──
+function renderPnlDiario(){
+  const db=loadDB();
+  const pnlDiarios=db.pnlDiario||[];
+  const txns=db.transactions||[];
+
+  // P&L GLOBAL HOY: ganBruta del pool (una vez por dateKey+pct, no por usuario)
+  const _seenG=new Set();
+  const pnlGlobalHoy=r2(pnlDiarios.filter(p=>p.dateKey===dateStr()).reduce((s,p)=>{
+    const k=p.dateKey+'_'+p.pct; if(_seenG.has(k)) return s; _seenG.add(k);
+    return s+parseFloat(p.pnlGlobal||p.ganBruta||0);
+  },0));
+
+  // P&L GLOBAL ACUMULADO: igual pero todos los días
+  const _seenGA=new Set();
+  const pnlTotalAcumulado=r2(pnlDiarios.reduce((s,p)=>{
+    const k=p.dateKey+'_'+p.pct; if(_seenGA.has(k)) return s; _seenGA.add(k);
+    return s+parseFloat(p.pnlGlobal||p.ganBruta||0);
+  },0));
+
+  // P&L USUARIO HOY: suma de transacciones tipo ganancia esDiario de hoy para este usuario
+  const pnlUsuarioHoy=r2(txns.filter(t=>t.uid===UID&&t.type==='ganancia'&&t.dateKey===dateStr()&&t.ganData&&t.ganData.esDiario).reduce((s,t)=>s+parseFloat(t.amount||0),0));
+
+  // P&L USUARIO ACUMULADO: suma de todas las transacciones tipo ganancia esDiario de este usuario
+  const pnlUsuarioAcumulado=r2(txns.filter(t=>t.uid===UID&&t.type==='ganancia'&&t.ganData&&t.ganData.esDiario).reduce((s,t)=>s+parseFloat(t.amount||0),0));
+  
+  // Actualizar totales
+  const el1=$('pnlGlobalHoy');if(el1) el1.textContent=fmt(pnlGlobalHoy);
+  const el2=$('pnlUsuarioHoy');if(el2) el2.textContent=fmt(pnlUsuarioHoy);
+  const el3=$('pnlTotalAcumulado');if(el3) el3.textContent=fmt(pnlTotalAcumulado);
+  const el4=$('pnlUsuarioAcumulado');if(el4) el4.textContent=fmt(pnlUsuarioAcumulado);
+  
+  // Historial por día
+  const histEl=$('pnlDiarioHist');
+  if(histEl){
+    // Agrupar por día usando pnlDiarios para global y transactions para usuario
+    const porDia={};
+    // Global: una entrada por dateKey+pct
+    const _seenH=new Set();
+    pnlDiarios.forEach(p=>{
+      const k=p.dateKey+'_'+p.pct; if(_seenH.has(k)) return; _seenH.add(k);
+      if(!porDia[p.dateKey]) porDia[p.dateKey]={global:0,usuario:0,fecha:p.dateStr||p.dateKey,pct:p.pct};
+      porDia[p.dateKey].global=r2(porDia[p.dateKey].global+parseFloat(p.pnlGlobal||p.ganBruta||0));
+      porDia[p.dateKey].pct=p.pct;
+    });
+    // Usuario: desde transactions esDiario
+    txns.filter(t=>t.uid===UID&&t.type==='ganancia'&&t.ganData&&t.ganData.esDiario).forEach(t=>{
+      const dk=t.dateKey||t.date?.split(' ')[0]||'';
+      if(!porDia[dk]) porDia[dk]={global:0,usuario:0,fecha:dk,pct:0};
+      porDia[dk].usuario=r2(porDia[dk].usuario+parseFloat(t.amount||0));
+    });
+    const sorted=Object.values(porDia).sort((a,b)=>b.fecha.localeCompare(a.fecha));
+    histEl.innerHTML=sorted.length?sorted.map(d=>`
+      <div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:0.55rem;margin-bottom:0.35rem">
+        <div style="display:flex;justify-content:space-between;margin-bottom:0.22rem">
+          <strong style="font-size:0.73rem">${d.fecha}</strong>
+          <span style="font-size:0.73rem;font-weight:800;color:var(--green)">+${fmt(d.usuario)}</span>
+        </div>
+        <div style="font-size:0.62rem;color:var(--muted)">Pool global: +${fmt(d.global)} · Tu parte: +${fmt(d.usuario)}</div>
+      </div>`).join(''):'<div class="empty" style="padding:0.38rem">Sin registros de P&L diario</div>';
+  }
+}
+
+// ── RENDER ──
+async function loadQuote(){ try{ const r=await fetch("https://api.quotable.io/random?tags=motivational"); const d=await r.json(); if(d.content) $("fraseTxt").textContent=d.content; }catch(e){ $("fraseTxt").textContent="El éxito es la suma de pequeños esfuerzos día tras día."; } }
+function render(){
+  window._SGH_render = render;
+  if(!UID) return;
+  
+  // Cargar datos
+  const db=loadDB();
+  const {invested,gains,total,ganHoy,refs,totalPool,ganPct,capBloqueado,capDisponible,opsAbiertas}=calcBot(UID);
+  const {totalInv,totalVal,pnl}=calcStocks(UID);
+  
+  // Renderizar todas las secciones
+  renderPnlDiario();
+  renderHistorialGanancias();
+  
+  // ACTUALIZAR DASHBOARD PRINCIPAL
+  // Capital y ganancias
+  const capBotEl=$('rCapBot');
+  if(capBotEl) capBotEl.textContent=fmt(total);
+  if(capBotEl && total>0) capBotEl.style.color='var(--green)';
+
+  // POOL GLOBAL (mostrar capital total del pool y operaciones activas)
+  const poolCapEl=$('sysCapTotal');
+  if(poolCapEl) poolCapEl.textContent=fmt(totalPool);
+  
+  const opsActivasEl=$('sysOpsActivas');
+  if(opsActivasEl) opsActivasEl.textContent=opsAbiertas.length;
+  
+  const capOperandoEl=$('sysCapOperando');
+  if(capOperandoEl) capOperandoEl.textContent=fmt(opsAbiertas.reduce((s,o)=>s+parseFloat(o.capUsado||0),0));
+  // rHoy: ganancia hoy desde ops cerradas hoy directamente
+  const _opsCerHoy=(db.botOps||[]).filter(o=>o.status==='closed'&&(o.closeDate===dateStr()||o.openDate===dateStr()));
+  const _refs=db.users.filter(u=>u.refBy&&u.refBy===UID).length;
+  const _pct=_refs>0?0.75:0.50;
+  const _ganHoyDirecto=r2(_opsCerHoy.reduce((s,o)=>s+r2(parseFloat(o.capUsado||0)*(parseFloat(o.tpPct||0)/100)*_pct),0));
+  const _ganHoyFinal=_ganHoyDirecto>0?_ganHoyDirecto:ganHoy;
+  const rHoyEl=$('rHoy'); if(rHoyEl) rHoyEl.textContent=fmt(_ganHoyFinal);
+  const livePnlEl=$('livePnlHoy'); if(livePnlEl) livePnlEl.textContent=fmt(_ganHoyFinal);
+  const rCapAccEl=$('rCapAcc'); if(rCapAccEl) rCapAccEl.textContent=fmt(totalVal);
+  const rRefsEl=$('rRefs'); if(rRefsEl) rRefsEl.textContent=refs;
+  const refCountEl=$('refCount'); if(refCountEl) refCountEl.textContent=refs;
+  const rAvailEl=$('rAvailAmt'); if(rAvailEl) rAvailEl.textContent=fmt(capDisponible);
+  const refLinkEl=$('refLink'); if(refLinkEl) refLinkEl.textContent=myRefLink();
+  const _me=db.users.find(u=>u.id===UID);
+  if(_me&&$('myRefCodeDisplay')) $('myRefCodeDisplay').textContent=_me.refCode||UID.slice(-6).toUpperCase();
+  // Mostrar capital usado en ops abiertas de hoy
+  const capUsadoHoy=r2(opsAbiertas.reduce((s,o)=>s+parseFloat(o.capUsado||0),0));
+  const poolMap2={};
+  const db2=loadDB();
+  db2.investments.filter(i=>i.status==='active').forEach(i=>{ poolMap2[i.uid]=(poolMap2[i.uid]||0)+i.amount; });
+  const poolTotal2=Object.values(poolMap2).reduce((s,v)=>s+v,0);
+  const miCapUsadoHoy=poolTotal2>0?r2(capUsadoHoy*((poolMap2[UID]||0)/poolTotal2)):0;
+  const liveCapLblEl=$('liveCapLbl'); if(liveCapLblEl) liveCapLblEl.textContent=`Cap. en op: ${fmt(miCapUsadoHoy)} de ${fmt(invested)} | ${Math.round(ganPct*100)}% tuyo`;
+  const livePnlHoy2=$('livePnlHoy'); if(livePnlHoy2) livePnlHoy2.textContent=fmt(ganHoy);
+
+  // Perfil
+  const me=db.users.find(u=>u.id===UID);
+  if(me){ $('profileName').textContent=me.name;$('profilePhone').textContent=me.phone;$('profileEmail').textContent=me.email||'Sin correo';$('profileAvatar').textContent=me.name[0].toUpperCase(); }
+
+  // Bot live ops
+  const ops=db.botOps||[];
+  // Mostrar TODAS las abiertas + las cerradas de hoy
+  const hoyOps=ops.filter(o=>!o._deleted && o.status!=='deleted' && (o.status==='open' || o.date===dateStr() || o.closeDate===dateStr()));
+  const liveEl=$('liveOps');
+  if(liveEl){
+    if(hoyOps.length){
+      liveEl.innerHTML=hoyOps.slice().reverse().slice(0,3).map(op=>`
+        <div class="op-card">
+          <div class="op-hdr">
+            <span class="op-strat">${op.strategy}</span>
+            <span class="op-st ${op.status}">${op.status==='open'?'🟢 Abierta':'✅ Cerrada'}</span>
+          </div>
+          <div class="op-grid3">
+            <div class="op-it"><div class="op-il">Entry</div><div class="op-iv go">$${parseFloat(op.entry||0).toFixed(2)}</div></div>
+            <div class="op-it"><div class="op-il">TP</div><div class="op-iv gc">$${parseFloat(op.tp||0).toFixed(2)}</div></div>
+            <div class="op-it"><div class="op-il">Cap. Usado</div><div class="op-iv" style="color:var(--purple)">${fmt(op.capUsado||0)}</div></div>
+            <div class="op-it"><div class="op-il">${op.status==='closed'?'Cerró':'TP%'}</div><div class="op-iv go">${op.status==='closed'?(op.closeDate||'')+(op.closeTime?' '+op.closeTime:''):'+'+parseFloat(op.tpPct||0).toFixed(2)+'%'}</div></div>
+          </div>
+          <div style="font-size:0.56rem;color:var(--muted);margin-top:0.18rem">🕐 ${op.openDate||''} ${op.openTime||''}</div>
+        </div>`).join('');
+    } else {
+      liveEl.innerHTML='<div class="empty" style="padding:0.42rem">Sin operaciones hoy</div>';
+    }
+  }
+  const hasOpen=ops.some(o=>o.status==='open');
+  const lsEl=$('liveStatus');
+  if(lsEl){ lsEl.textContent=hasOpen?'🟢 Operando':'⏸ En espera'; lsEl.className='bls '+(hasOpen?'on':'off'); }
+
+  // Banner bloqueado
+  const bb=$('blockedBanner');
+  if(bb) bb.style.display=hasOpen?'block':'none';
+
+  // Todas las transacciones
+  const txns=db.transactions.filter(t=>t.uid===UID&&Math.abs(t.amount)>0).slice().reverse();
+  const txnAllEl=$('txnAll');
+  if(txnAllEl) txnAllEl.innerHTML=txns.length?txns.map(txCard).join(''):'<div class="empty">Sin movimientos aún</div>';
+
+  // Acciones resumen
+  const sInvEl=$('sInv'); if(sInvEl) sInvEl.textContent=fmt(totalInv);
+  const sValEl=$('sVal'); if(sValEl) sValEl.textContent=fmt(totalVal);
+  const plEl=$('sPl'); if(plEl){ plEl.textContent=(pnl>=0?'+':'')+fmt(pnl); plEl.style.color=pnl>=0?'var(--green)':'var(--red)'; }
+
+  // Ganancias
+  renderEarnHist();
+
+  // PnL diario historial (visible al usuario)
+  const pnlEl=$('pnlDiarioHist');
+  if(pnlEl){
+    const pnlTxns=(db.transactions||[]).filter(t=>t.uid===UID&&t.type==='ganancia'&&t.ganData?.esDiario).slice().reverse();
+    if(!pnlTxns.length){ pnlEl.innerHTML='<div class="empty">Sin PnL diario registrado aún</div>'; }
+    else {
+      pnlEl.innerHTML=pnlTxns.map(t=>{
+        return `<div style="background:var(--card);border:1px solid rgba(46,204,113,0.2);border-radius:12px;padding:0.6rem 0.8rem;margin-bottom:0.38rem;display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-size:0.72rem;font-weight:700;color:var(--green)">💰 ${t.ganData?.pct||0}% del día</div>
+            <div style="font-size:0.6rem;color:var(--muted);margin-top:0.08rem">${t.date}</div>
+            <div style="font-size:0.58rem;color:var(--muted)">${t.desc.split('·').slice(2).join('·').trim()||''}</div>
+          </div>
+          <div style="font-size:0.95rem;font-weight:800;color:var(--green)">+${fmt(t.amount)}</div>
+        </div>`;
+      }).join('');
+    }
+  }
+
+  // Dividendos
+  const divTxns=db.transactions.filter(t=>t.uid===UID&&t.type==='dividendo'&&t.amount>0).slice().reverse();
+  const divHistEl=$('divHist');
+  if(divHistEl) divHistEl.innerHTML=divTxns.length?divTxns.map(t=>`
+    <div class="txn"><div class="txn-ic g">💰</div><div style="flex:1"><div class="txn-desc">${t.desc}</div><div class="txn-date">${t.date}</div></div><div class="txn-amt g">+${fmt(t.amount)}</div></div>`).join(''):'<div class="empty">Sin dividendos aún</div>';
+
+  // Trades fotos
+  const tfEl=$('tradesFotos');
+  if(tfEl){ const tr=db.trades||[];tfEl.innerHTML=tr.length?tr.slice().reverse().map(t=>`<img src="${t.url}" alt="${t.desc}" class="trade-img" onerror="this.style.display='none'"><div style="font-size:0.68rem;color:var(--muted);margin-bottom:0.52rem">📸 ${t.desc} · ${t.date}</div>`).join(''):'<div class="empty">Sin capturas</div>'; }
+
+  renderStocks();
+  renderAdmin(); updateV9Stats();
+}
+
+function renderEarnHist(){
+  if(!UID) return;
+  const db=loadDB();
+  const {ganPct}=calcBot(UID);
+  const hoy=dateStr();
+
+  const byDay={};
+  (db.ganancias||[]).forEach(g=>{ if(!byDay[g.dateKey]) byDay[g.dateKey]={dateStr:g.dateStr,ops:[]}; (g.ops||[]).forEach(op=>byDay[g.dateKey].ops.push(op)); });
+  if(!byDay[hoy]) byDay[hoy]={dateStr:todayLabel(),ops:[]};
+  const days=Object.entries(byDay).sort((a,b)=>b[0].localeCompare(a[0]));
+  const el=$('earnHist');if(!el) return;
+
+  el.innerHTML=days.map(([dk,dv])=>{
+    const esHoy=dk===hoy;
+    // Ganancia del día: suma de transacciones reales de ganancia del usuario en ese día
+    const ganDia=r2((db.transactions||[]).filter(t=>t.uid===UID&&t.type==='ganancia'&&t.amount>0&&t.dateKey===dk).reduce((s,t)=>s+t.amount,0));
+
+    const opsHtml=(dv.ops||[]).length?(dv.ops||[]).map(op=>{
+      const capUsadoOp=parseFloat(op.capUsado||0);
+      const pctOp=parseFloat(op.pct||0);
+      const ganBruta=r2(capUsadoOp*pctOp/100);
+      const ganUsr=r2(ganBruta*ganPct);
+      return `<div style="padding:0.35rem 0.7rem;border-bottom:1px solid rgba(255,255,255,0.03)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:0.64rem;color:var(--muted)">${op.strategy}</span>
+          <span style="font-size:0.7rem;font-weight:800;color:var(--green)">+${fmt(ganUsr)}</span>
+        </div>
+        <div style="font-size:0.6rem;color:var(--muted);margin-top:0.08rem">
+          $${fmt(capUsadoOp)} × ${pctOp.toFixed(2)}% = ${fmt(ganBruta)} bruto · ${Math.round(ganPct*100)}% tuyo = <strong style="color:var(--gold)">${fmt(ganUsr)}</strong>
+        </div>
+      </div>`;
+    }).join(''):'<div style="padding:0.35rem 0.7rem;font-size:0.64rem;color:var(--muted)">Sin operaciones cerradas · $0.00</div>';
+
+    return `<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:0.42rem;overflow:hidden">
+      <div style="padding:0.52rem 0.7rem;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)">
+        <div><div style="font-size:0.72rem;font-weight:700">${esHoy?'<span style="color:var(--gold)">Hoy</span>':dv.dateStr}</div><div style="font-size:0.58rem;color:var(--muted)">${dk}</div></div>
+        <div style="text-align:right"><div style="font-size:0.75rem;font-weight:800;color:var(--green)">+${fmt(ganDia)}</div><div style="font-size:0.58rem;color:var(--muted)">${Math.round(ganPct*100)}% tuyo</div></div>
+      </div>${opsHtml}</div>`;
+  }).join('');
+}
+
+function txCard(t){
+  const isR=t.type==='retiro', isG=t.type==='ganancia', isDiv=t.type==='dividendo', isAV=t.type==='accion_venta', isAC=t.type==='accion_compra';
+  const ic=isR?'⬇️':isG?'📈':isDiv?'💰':isAV?'📤':isAC?'🛒':'⬆️';
+  const cls=isR?'r':isG||isDiv||isAV?'g':'d';
+  const sign=isR||isAC?'-':'+';
+  const badge=t.status==='pendiente'?`<span class="badge pending">Pendiente</span>`:t.status==='procesando'?`<span class="badge proc">Procesando</span>`:t.status==='completado'?`<span class="badge done">Completado</span>`:t.status==='rechazado'?`<span class="badge" style="background:var(--redd);color:var(--red)">Rechazado</span>`:'';
+  return `<div class="txn"><div class="txn-ic ${cls}">${ic}</div><div style="flex:1"><div class="txn-desc">${t.desc} ${badge}</div><div class="txn-date">${t.date}</div></div><div class="txn-amt ${cls}">${sign}${fmt(Math.abs(t.amount))}</div></div>`;
+}
+
+
+// --- LÓGICA V9 ---
+function showToast(msg, icon='🔔') {
+  const container = document.getElementById('toast-container') || createToastContainer();
+  const t = document.createElement('div');
+  t.className = 'toast animate__animated animate__slideInRight';
+  t.innerHTML = `<span>${icon}</span><div>${msg}</div>`;
+  container.appendChild(t);
+  setTimeout(() => {
+    t.classList.replace('animate__slideInRight', 'animate__fadeOutRight');
+    setTimeout(() => t.remove(), 500);
+  }, 4000);
+}
+function createToastContainer() {
+  const c = document.createElement('div');
+  c.id = 'toast-container';
+  c.className = 'toast-container';
+  document.body.appendChild(c);
+  return c;
+}
+
+function updateV9Stats() {
+  if(!UID) return;
+  const db = loadDB();
+  const {invested, gains, total} = calcBot(UID);
+  
+  // Calcular Pool Global
+  let poolTotal = 0;
+  db.investments.filter(i=>i.status==='active').forEach(i => poolTotal += i.amount);
+  const poolOps = db.botOps.filter(o=>o.status==='open').length;
+  const capOperando = db.botOps.filter(o=>o.status==='open').reduce((s,o)=>s+parseFloat(o.capUsado||0), 0);
+  const inversores = new Set(db.investments.filter(i=>i.status==='active').map(i=>i.uid)).size;
+
+  // Actualizar Mi Participación
+  const idsV9 = {
+    'v9-capAportado': fmt(invested),
+    'v9-participacion': poolTotal > 0 ? ((invested/poolTotal)*100).toFixed(1) + '%' : '0%',
+    'v9-ganAcum': '+' + fmt(gains),
+    'v9-valActual': fmt(total),
+    'v9-poolTotal': fmt(poolTotal),
+    'v9-poolOperando': fmt(capOperando),
+    'v9-poolInv': inversores,
+    'v9-poolOps': poolOps
+  };
+
+  for (const [id, val] of Object.entries(idsV9)) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  }
+
+  // PnL diario del pool
+  const hoyStr=dateStr();
+  const opsCerHoy=db.botOps.filter(o=>o.status==='closed'&&(o.closeDate===hoyStr||o.openDate===hoyStr));
+  let pnlDiaPool=r2(opsCerHoy.reduce((s,o)=>s+r2(parseFloat(o.capUsado||0)*(parseFloat(o.tpPct||0)/100)),0));
+  const pnlDiariosHoy=(db.pnlDiario||[]).filter(p=>p.dateKey===hoyStr);
+  pnlDiariosHoy.forEach(p=>{ pnlDiaPool=r2(pnlDiaPool+(p.ganBruta||0)); });
+  
+  const pnlEl=document.getElementById('v9-pnlDia');
+  if (pnlEl) pnlEl.textContent = '+' + fmt(pnlDiaPool);
+  
+  const subEl=document.getElementById('poolPnlSub');
+  if (subEl) subEl.textContent = `${opsCerHoy.length} ops cerradas hoy`;
+
+  // ── ESTADO DEL SISTEMA ──
+  const opsAbiertas = db.botOps.filter(o=>o.status==='open');
+
+  // Ops activas
+  const sysOps = document.getElementById('sysOpsActivas');
+  if (sysOps) sysOps.textContent = poolOps;
+
+  // Última actualización
+  const upEl = document.getElementById('sysLastUpdate');
+  if(upEl) upEl.textContent = new Date().toLocaleString('es-MX',{hour:'2-digit',minute:'2-digit'});
+
+  // Estado del mercado dinámico basado en ops abiertas
+  const btcOps = opsAbiertas.filter(o=>(o.strategy||'').toUpperCase().includes('BTC'));
+  const ethOps = opsAbiertas.filter(o=>(o.strategy||'').toUpperCase().includes('ETH'));
+  const solOps = opsAbiertas.filter(o=>(o.strategy||'').toUpperCase().includes('SOL'));
+  const stBTC = document.getElementById('sysStatBTC');
+  const stETH = document.getElementById('sysStatETH');
+  const stSOL = document.getElementById('sysStatSOL');
+  if(stBTC){ stBTC.textContent = btcOps.length>0?'🟡 En operación':'🟢 En espera'; stBTC.style.color = btcOps.length>0?'var(--gold)':'var(--green)'; }
+  if(stETH){ stETH.textContent = ethOps.length>0?'🟡 En operación':'🟢 En espera'; stETH.style.color = ethOps.length>0?'var(--gold)':'var(--green)'; }
+  if(stSOL){ stSOL.textContent = solOps.length>0?'🟡 En operación':'🟢 En espera'; stSOL.style.color = solOps.length>0?'var(--gold)':'var(--green)'; }
+
+  // Tendencia basada en cantidad de ops
+  const tend = document.getElementById('sysTendencia');
+  if(tend){ tend.textContent = opsAbiertas.length>5?'📈 Activo':'⚖️ Neutral'; tend.style.color = opsAbiertas.length>5?'var(--green)':'var(--muted)'; }
+
+  // Actividad reciente: últimas 4 ganancias de cualquier usuario
+  const actEl = document.getElementById('sysActividadReciente');
+  if(actEl){
+    const ultGans = (db.transactions||[]).filter(t=>t.type==='ganancia'&&t.amount>0).slice(-4).reverse();
+    if(ultGans.length>0){
+      actEl.innerHTML = ultGans.map(t=>{
+        const sym = (t.ganData?.strategy||'BOT').split(' ').pop().replace('SOLANA','SOL');
+        return `<div style="font-size:0.57rem;color:var(--green);font-weight:700;margin-bottom:0.1rem;">${sym} +${fmt(t.amount)}</div>`;
+      }).join('');
+    } else {
+      actEl.innerHTML = '<div style="font-size:0.58rem;color:var(--muted);">Sin actividad</div>';
+    }
+  }
+}
+
+function updateGrowthChart(uid) {
+  const wrap = document.getElementById('growthChartWrap');
+  if(!wrap) return;
+  const db = loadDB();
+  const txs = db.transactions.filter(t=>t.uid===uid && t.type==='ganancia').slice(-7);
+  if(txs.length===0){ wrap.innerHTML=''; return; }
+  const vals = txs.map(t=>parseFloat(t.amount||0));
+  const maxVal = Math.max(...vals, 0.01);
+  const bars = vals.map((v,i)=>{
+    const h = Math.max(8, Math.round((v/maxVal)*52));
+    const d = (txs[i].date||'').split(' ')[0].slice(5);
+    return '<div style="display:flex;flex-direction:column;align-items:center;gap:3px;flex:1">'
+      +'<div style="font-size:0.48rem;color:#d4a843;font-weight:700">+$'+v.toFixed(2)+'</div>'
+      +'<div style="width:100%;background:linear-gradient(180deg,#d4a843,rgba(212,168,67,0.3));border-radius:4px 4px 0 0;height:'+h+'px;min-height:8px;transition:height 0.4s"></div>'
+      +'<div style="font-size:0.42rem;color:#5a8070">'+d+'</div>'
+      +'</div>';
+  }).join('');
+  wrap.innerHTML='<div style="display:flex;align-items:flex-end;gap:4px;padding:8px 4px 2px;height:80px;background:rgba(0,0,0,0.15);border-radius:10px;margin-top:6px;">'+bars+'</div>';
+}
+
+// Sesión automática
+let lastActivity = Date.now();
+document.addEventListener('mousedown', () => lastActivity = Date.now());
+setInterval(() => {
+  if(UID && (Date.now() - lastActivity > 600000)) { // 10 minutos inactividad
+    showToast('Sesión cerrada por inactividad', '🔒');
+    setTimeout(logout, 2000);
+  }
+}, 30000);
+
+// ── TABS ──
+function sw(tab){
+  ['home','stocks','earn','nos','info','news','profile'].forEach(t=>{
+    const el=$('t-'+t);if(el) el.classList.toggle('on',t===tab);
+    const n=$('n-'+t);if(n) n.classList.toggle('on',t===tab);
+  });
+  if(tab==='news') loadNoticias();
+  if(tab==='earn') renderHistorialGanancias();
+  if(tab==='stocks') renderStocks();
+  render();
+}
+function tInfo(id){ const b=$('body-'+id),a=$('arr-'+id);if(!b)return;b.classList.toggle('on');a.textContent=b.classList.contains('on')?'▲':'▼'; }
+
+// ── STOCKS TABS ──
+function stockTab(mode){
+  stockTabMode=mode;
+  document.querySelectorAll('#t-stocks .rtab').forEach(e=>e.classList.remove('on'));
+  $('stab-'+mode)?.classList.add('on');
+  $('stock-port').style.display=mode==='port'?'block':'none';
+  $('stock-market').style.display=mode==='market'?'block':'none';
+  renderStocks();
+}
+
+
+async function updateStockPrices() {
+  const db = loadDB();
+  const cat = db.stockCatalog || [];
+  if(!cat.length) return;
+  
+  // Solo actualizar cada 30 minutos para no saturar
+  const ahora = Date.now();
+  if(window._lastStockUpdate && (ahora - window._lastStockUpdate < 1400000)) return;
+  window._lastStockUpdate = ahora;
+
+  for(let acc of cat) {
+    try {
+      const variacion = (Math.random() * 0.4 - 0.2); // +/- 0.2%
+      acc.precio = r2(acc.precio * (1 + variacion/100));
+      acc.chg = r2(variacion);
+    } catch(e) {}
+  }
+  // Solo actualizar localStorage, NO Firebase (no es un cambio real de datos)
+  try{
+    const localRaw=localStorage.getItem('sgh_v11');
+    if(localRaw){
+      const localDb=JSON.parse(localRaw);
+      localDb.stockCatalog=cat;
+      localStorage.setItem('sgh_v11',JSON.stringify(localDb));
+    }
+  }catch(e){}
+  renderStocks();
+}
+
+function renderStocks(){
+  if(!UID) return;
+  const db=loadDB();
+  const cat=db.stockCatalog||[];
+  const {positions,totalInv,totalVal,pnl}=calcStocks(UID);
+
+  // Portafolio
+  const portEl=$('myStocks');
+  if(portEl){
+    // Agrupar dividendos por ticker
+    const divsByTicker={};
+    db.transactions.filter(t=>t.uid===UID&&t.type==='dividendo'&&t.amount>0).forEach(t=>{
+      const tk=t.desc.match(/·\s*(\w+)\s*·/)?.[1]||'';
+      if(tk){ divsByTicker[tk]=(divsByTicker[tk]||0)+t.amount; }
+    });
+
+    if(!positions.length){ portEl.innerHTML='<div class="empty">Sin acciones. Ve al Mercado para comprar.</div>'; }
+    else{
+      portEl.innerHTML=positions.map(p=>{
+        const ac=cat.find(a=>a.ticker===p.ticker)||{logo:'📊',nombre:p.ticker};
+        const precio=ac.precio||p.precioCompra;
+        const chg=ac.chg||0;
+        const valorActual=r2(p.cantidad*precio);
+        const valorCompra=r2(p.cantidad*p.precioCompra);
+        const pl=r2(valorActual-valorCompra);
+        const plPct=valorCompra>0?r2(pl/valorCompra*100):0;
+        const divAcum=divsByTicker[p.ticker]||0;
+        return `<div class="port-card">
+          <div class="port-hdr">
+            <div>
+              <div style="font-size:0.83rem;font-weight:800">${ac.logo} ${ac.nombre}</div>
+              <div style="font-size:0.6rem;color:var(--muted)">${p.ticker} · ${r4(p.cantidad)} acciones</div>
+              <div style="font-size:0.58rem;color:var(--muted)">Comprado: ${p.fechaCompra} ${p.horaCompra||''}</div>
+            </div>
+            <div style="text-align:right">
+              <div style="font-size:0.9rem;font-weight:800;color:var(--gold2)">$${precio.toFixed(2)}</div>
+              <div class="acc-chg ${chg>=0?'up':'dn'}" style="font-size:0.6rem">${chg>=0?'+':''}${chg.toFixed(2)}%</div>
+            </div>
+          </div>
+          <div class="port-g">
+            <div class="port-item"><div class="port-lbl">Precio compra</div><div class="port-val go">$${p.precioCompra.toFixed(2)}</div></div>
+            <div class="port-item"><div class="port-lbl">Valor actual</div><div class="port-val">${fmt(valorActual)}</div></div>
+            <div class="port-item"><div class="port-lbl">Invertido</div><div class="port-val">${fmt(valorCompra)}</div></div>
+            <div class="port-item"><div class="port-lbl">Dividendos acum.</div><div class="port-val gc">${fmt(divAcum)}</div></div>
+          </div>
+          <div class="port-pl">
+            <span style="font-size:0.6rem;color:var(--muted)">P&L total</span>
+            <span style="font-size:0.85rem;font-weight:800;color:${pl>=0?'var(--green)':'var(--red)'}">${pl>=0?'+':''}${fmt(pl)} (${pl>=0?'+':''}${plPct.toFixed(2)}%)</span>
+          </div>
+          <button class="btn red" style="padding:0.58rem;font-size:0.78rem" onclick="openVenta('${p.id}')">💰 Vender acciones</button>
+        </div>`;
+      }).join('');
+    }
+  }
+
+  // Mercado
+  const mktEl=$('stockMarketList');
+  if(mktEl){
+    mktEl.innerHTML=cat.map((a,i)=>`
+      <div class="acc-mkt-card">
+        <div class="acc-hdr">
+          <div class="acc-logo" style="background:${a.bg||'#1a1a1a'}">${a.logo||'📊'}</div>
+          <div style="flex:1"><div class="acc-name">${a.nombre}</div><div class="acc-ticker">${a.ticker}</div></div>
+          <div class="acc-price-row">
+            <div class="acc-price">$${parseFloat(a.precio||0).toFixed(2)}</div>
+            <div class="acc-chg ${(a.chg||0)>=0?'up':'dn'}">${(a.chg||0)>=0?'+':''}${parseFloat(a.chg||0).toFixed(2)}%</div>
+          </div>
+        </div>
+        <div class="acc-desc">${a.desc||''}</div>
+        <div class="acc-div-info">${a.divInfo||''}</div>
+        <button class="btn green" style="padding:0.55rem;font-size:0.78rem;margin-top:0" onclick="openCompra(${i})">🛒 Comprar</button>
+      </div>`).join('');
+  }
+}
+
+// ── COMPRAR ACCIÓN ──
+function openCompra(idx){
+  const db=loadDB();
+  const cat=db.stockCatalog||[];
+  accSelIdx=idx;
+  const a=cat[idx];if(!a) return;
+  $('mAccTtl').textContent=`${a.logo} Comprar ${a.nombre}`;
+  $('mAccInfo').innerHTML=`<strong>${a.nombre} (${a.ticker})</strong><br>${a.desc||''}<br><br>${a.divInfo||''}`;
+  $('mAccPrecio').innerHTML=`Precio actual: <strong>$${parseFloat(a.precio||0).toFixed(2)} USD</strong> por acción<br>El 2% de las acciones compradas va al equipo (en acciones, no en dinero).`;
+  $('accCantidad').value='';$('accCalc').style.display='none';
+  showErr('eComprarAcc','');showOk('okComprarAcc','');
+  $('mComprarAcc').classList.add('on');
+}
+
+function calcCompraAcc(){
+  const db=loadDB();
+  const cat=db.stockCatalog||[];
+  if(accSelIdx<0||accSelIdx>=cat.length) return;
+  const a=cat[accSelIdx];
+  const qty=parseFloat($('accCantidad').value||0);
+  const price=a.precio||0;
+  if(!qty||qty<=0) return;
+  const subtotal=r2(qty*price);
+  const comAcciones=r4(qty*COM_ACC_PCT); // 2% en acciones
+  const accionesNetas=r4(qty-comAcciones);
+  const calc=$('accCalc');
+  calc.innerHTML=`Compras: <strong>${qty} acciones</strong> × $${price.toFixed(2)} = <strong>${fmt(subtotal)}</strong><br>Comisión equipo (2%): <strong>${comAcciones.toFixed(4)} acciones</strong><br>Acciones que recibirás: <strong style="color:var(--green)">${accionesNetas.toFixed(4)} ${a.ticker}</strong><br>Costo total: <strong style="color:var(--gold)">${fmt(subtotal)} USDT</strong>`;
+  calc.style.display='block';
+}
+
+function confirmarCompraAcc(){
+  showErr('eComprarAcc','');showOk('okComprarAcc','');
+  const db=loadDB();
+  const cat=db.stockCatalog||[];
+  if(accSelIdx<0||accSelIdx>=cat.length) return;
+  const a=cat[accSelIdx];
+  const qty=parseFloat($('accCantidad').value||0);
+  const pin=$('accPin').value.trim();
+  if(!qty||qty<=0){ showErr('eComprarAcc','Ingresa la cantidad'); return; }
+  if(!pin){ showErr('eComprarAcc','Ingresa tu PIN'); return; }
+  const u=db.users.find(u=>u.id===UID);
+  if(!u||u.pin!==pin){ showErr('eComprarAcc','PIN incorrecto'); return; }
+  const price=a.precio||0;
+  const subtotal=r2(qty*price);
+  const comAcc=r4(qty*COM_ACC_PCT);
+  const accionesNetas=r4(qty-comAcc);
+  const now=new Date();
+  db.transactions.push({
+    id:'ac'+Date.now(),uid:UID,type:'accion_compra',amount:subtotal,
+    desc:`🛒 Solicitud: ${qty} ${a.ticker} a $${price.toFixed(2)} | Recibirás: ${accionesNetas.toFixed(4)} acciones`,
+    date:dtStr(),status:'pendiente',
+    accData:{ticker:a.ticker,nombre:a.nombre,cantidadBruta:qty,precioCompra:price,comAcciones:comAcc,accionesNetas,total:subtotal,fechaCompra:dateStr(),horaCompra:now.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'})}
+  });
+  saveDB(db);
+  showOk('okComprarAcc',`✅ Solicitud enviada. El admin confirmará tu compra de ${accionesNetas.toFixed(4)} ${a.ticker}.`);
+  $('accCantidad').value='';$('accPin').value='';
+  setTimeout(()=>{ closeM('mComprarAcc');render(); },2500);
+}
+
+// ── VENDER ACCIÓN ──
+function openVenta(posId){
+  const db=loadDB(),cat=db.stockCatalog||[];
+  const pos=(db.stockPositions||[]).find(p=>p.id===posId&&p.uid===UID);
+  if(!pos) return;
+  accVendPos=pos;
+  const ac=cat.find(a=>a.ticker===pos.ticker)||{};
+  const price=ac.precio||pos.precioCompra;
+  $('mVendTtl').textContent=`💰 Vender ${ac.nombre||pos.ticker}`;
+  $('mVendInfo').innerHTML=`Tienes <strong>${r4(pos.cantidad)} acciones</strong> de <strong>${pos.ticker}</strong><br>Precio actual: <strong>$${price.toFixed(2)}</strong> · Compradas a: <strong>$${pos.precioCompra.toFixed(2)}</strong>`;
+  $('vCantidad').value='';$('vCalc').style.display='none';$('vDestino').value='';
+  showErr('eVenderAcc','');showOk('okVenderAcc','');
+  $('mVenderAcc').classList.add('on');
+}
+
+function calcVentaAcc(){
+  if(!accVendPos) return;
+  const db=loadDB(),cat=db.stockCatalog||[];
+  const ac=cat.find(a=>a.ticker===accVendPos.ticker)||{};
+  const qty=parseFloat($('vCantidad').value||0);
+  const price=ac.precio||accVendPos.precioCompra;
+  if(!qty||qty<=0) return;
+  if(qty>accVendPos.cantidad){ showErr('eVenderAcc',`Máximo ${r4(accVendPos.cantidad)} acciones`); return; }
+  const bruto=r2(qty*price);
+  const impuesto=r2(bruto*IMP_VENTA);
+  const neto=r2(bruto-impuesto);
+  const pl=r2(bruto-r2(qty*accVendPos.precioCompra));
+  $('vCalc').innerHTML=`${qty} acc × $${price.toFixed(2)} = <strong>${fmt(bruto)}</strong><br>Impuesto plusvalía (1.5%): <strong>-${fmt(impuesto)}</strong><br>Recibirás: <strong style="color:var(--green)">${fmt(neto)}</strong><br>P&L: <strong style="color:${pl>=0?'var(--green)':'var(--red)'}">${pl>=0?'+':''}${fmt(pl)}</strong>`;
+  $('vCalc').style.display='block';showErr('eVenderAcc','');
+}
+
+function confirmarVentaAcc(){
+  showErr('eVenderAcc','');showOk('okVenderAcc','');
+  if(!accVendPos) return;
+  const qty=parseFloat($('vCantidad').value||0);
+  const wpin=$('vPin').value.trim();
+  const destino=$('vDestino').value.trim();
+  if(!qty||qty<=0){ showErr('eVenderAcc','Ingresa cantidad'); return; }
+  if(qty>accVendPos.cantidad){ showErr('eVenderAcc','Cantidad mayor a tu posición'); return; }
+  if(!destino){ showErr('eVenderAcc','Ingresa tu wallet o datos bancarios'); return; }
+  if(!wpin){ showErr('eVenderAcc','Ingresa tu PIN de retiro'); return; }
+  const db=loadDB();
+  const u=db.users.find(u=>u.id===UID);
+  if(!u||u.wpin!==wpin){ showErr('eVenderAcc','PIN de retiro incorrecto'); return; }
+  const cat=db.stockCatalog||[];
+  const ac=cat.find(a=>a.ticker===accVendPos.ticker)||{};
+  const price=ac.precio||accVendPos.precioCompra;
+  const bruto=r2(qty*price),impuesto=r2(bruto*IMP_VENTA),neto=r2(bruto-impuesto);
+  const now=new Date();
+  db.transactions.push({
+    id:'av'+Date.now(),uid:UID,type:'accion_venta',amount:neto,
+    desc:`📤 Venta ${qty} ${accVendPos.ticker} a $${price.toFixed(2)} | Neto: ${fmt(neto)}`,
+    date:dtStr(),status:'pendiente',
+    accData:{posId:accVendPos.id,ticker:accVendPos.ticker,cantidad:qty,precioVenta:price,bruto,impuesto,neto,destino,metodo:$('vMetodo').value,fechaVenta:dateStr(),horaVenta:now.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'})}
+  });
+  saveDB(db);
+  showOk('okVenderAcc','✅ Solicitud de venta enviada. El admin procesará tu retiro en 24–48h.');
+  setTimeout(()=>{ closeM('mVenderAcc');render(); },2500);
+}
+
+// ── MODALES ──
+function openM(type){
+  ['mDep','mMemb','mRet','mChat'].forEach(id=>$(id).classList.remove('on'));
+  if(type==='dep') $('mDep').classList.add('on');
+  else if(type==='memb') $('mMemb').classList.add('on');
+  else if(type==='ret'){ $('mRet').classList.add('on');calcRet(); }
+  else if(type==='chat') $('mChat').classList.add('on');
+}
+function closeM(id){ $(id).classList.remove('on'); }
+
+// ── MEMBRESIA ──
+function calcMembresiaModal(){
+  const base=parseFloat($('membBase').value||0);
+  if(base>0){
+    const memb=r2(base*0.10);
+    const c=$('membModalCalc');
+    c.innerHTML=`Membresía del 10% sobre $${base}: <strong style="color:var(--gold)">${fmt(memb)} USDT</strong>`;
+    c.style.display='block';
+  }
+}
+
+// ── DEPÓSITO ──
+function depNext(){
+  showErr('eDep','');showOk('okDep','');
+  const amount=parseFloat($('dAmt').value);
+  if(!amount||amount<30){ showErr('eDep','Mínimo $30 USDT'); return; }
+  $('depAmt2').textContent=amount.toFixed(2)+' USDT';
+  $('depAmt3').textContent=amount.toFixed(2)+' USDT';
+  $('depStep1').style.display='none';$('depStep2').style.display='block';
+}
+function depBack(){ $('depStep1').style.display='block';$('depStep2').style.display='none'; }
+function copyW(txt,btn){
+  navigator.clipboard.writeText(txt).catch(()=>{ const t=document.createElement('textarea');t.value=txt;document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t); });
+  const orig=btn.innerHTML;btn.textContent='✅ Copiado!';setTimeout(()=>btn.innerHTML=orig,2000);
+}
+function confirmDeposit(tipo){
+  const db=loadDB();
+  if(tipo==='bot'){
+    showErr('eDep','');showOk('okDep','');
+    const amount=parseFloat($('dAmt').value||0);
+    if(amount<30){ showErr('eDep','Mínimo $30'); return; }
+    db.transactions.push({id:'tx'+Date.now(),uid:UID,type:'deposito',amount,desc:'⬆️ Depósito Pool Range Trading BEP-20',date:dtStr(),status:'pendiente',invAmount:amount});
+    saveDB(db);showOk('okDep','✅ Depósito notificado. Tu saldo se activa cuando el admin confirme.');
+    setTimeout(()=>{ closeM('mDep');$('depStep1').style.display='block';$('depStep2').style.display='none';render(); },3000);
+  } else if(tipo==='memb'){
+    showErr('eMemb','');showOk('okMemb','');
+    const base=parseFloat($('membBase').value||0);
+    const memb=r2(base*0.10);
+    if(memb<=0){ showErr('eMemb','Ingresa el monto de tu depósito primero'); return; }
+    db.transactions.push({id:'mb'+Date.now(),uid:UID,type:'deposito',amount:memb,desc:`🎓 Membresía (10% de $${base}) BEP-20`,date:dtStr(),status:'pendiente',esMembresia:true});
+    saveDB(db);showOk('okMemb','✅ Membresía notificada. El admin la confirmará.');
+    setTimeout(()=>{ closeM('mMemb');render(); },2500);
+  }
+}
+
+// ── RETIRO BOT ──
+function retTab(mode,el){ retMode=mode;document.querySelectorAll('#mRet .rtab').forEach(e=>e.classList.remove('on'));document.querySelectorAll('.ret-method').forEach(e=>e.classList.remove('on'));el.classList.add('on');$('ret-'+mode).classList.add('on'); }
+function calcRet(){
+  const amt=parseFloat($('rAmt').value||0);
+  if(amt>0){ const fee=r2(amt*COM_BOT/100),net=r2(amt-fee);const c=$('rCalc');c.innerHTML=`Comisión (${COM_BOT}%): <strong>-${fmt(fee)}</strong> · Recibirás: <strong style="color:var(--green)">${fmt(net)} USDT</strong>`;c.style.display='block'; }
+}
+function doWithdraw(){
+  showErr('eRet','');showOk('okRet','');
+  const amount=parseFloat($('rAmt').value);
+  const wpin=$('rWpin2').value.trim();
+  if(!amount||!wpin){ showErr('eRet','Completa todos los campos'); return; }
+  if(amount<5){ showErr('eRet','Mínimo $5 USDT'); return; }
+  let destino='';
+  if(retMode==='usdt'){ const w=$('rWalletUsdt').value.trim();if(!w||!w.startsWith('0x')){ showErr('eRet','Wallet BEP-20 inválida'); return; } destino=`USDT → ${w.slice(0,8)}...${w.slice(-4)}`; }
+  else if(retMode==='chile'){ const b=$('rBancoChile').value,tipo=$('rTipoChile').value,rut=$('rRutChile').value.trim(),cta=$('rCuentaChile').value.trim(),tit=$('rTitularChile').value.trim();if(!rut||!cta||!tit){ showErr('eRet','Completa los datos'); return; } destino=`🇨🇱 ${b} · ${tipo} · ${rut} · ${cta} · ${tit}`; }
+  else if(retMode==='vzla'){ const b=$('rBancoVzla').value,tipo=$('rTipoVzla').value,ced=$('rCedVzla').value.trim(),cta=$('rCuentaVzla').value.trim(),tit=$('rTitularVzla').value.trim();if(!ced||!cta||!tit){ showErr('eRet','Completa los datos'); return; } destino=`🇻🇪 ${b} · ${tipo} · ${ced} · ${cta} · ${tit}`; }
+  else { const b=$('rBancoMx').value,tipo=$('rTipoMx').value,clabe=$('rClabeMx').value.trim(),tit=$('rTitularMx').value.trim();if(!clabe||!tit){ showErr('eRet','Completa los datos'); return; } destino=`🇲🇽 ${b} · ${tipo} · ${clabe} · ${tit}`; }
+  const db=loadDB();
+  const u=db.users.find(u=>u.id===UID);
+  if(!u||u.wpin!==wpin){ showErr('eRet','PIN de retiro incorrecto'); return; }
+  const {capDisponible,gains}=calcBot(UID);
+  if(amount>capDisponible){ showErr('eRet',`Disponible: ${fmt(capDisponible)} (puede haber capital bloqueado en ops abiertas)`); return; }
+  const fee=r2(amount*COM_BOT/100),net=r2(amount-fee);
+  let rem=amount;
+  if(gains>0&&rem>0){ const d=Math.min(gains,rem);db.transactions.push({id:'gd'+Date.now(),uid:UID,type:'ganancia',amount:-d,desc:'Descuento por retiro',date:dtStr(),dateKey:dateStr(),status:'completado'});rem=r2(rem-d); }
+  if(rem>0){ db.investments.filter(i=>i.uid===UID&&i.status==='active').reverse().forEach(inv=>{ if(rem<=0)return;if(inv.amount<=rem){ inv.status='withdrawn';rem=r2(rem-inv.amount); }else{ inv.amount=r2(inv.amount-rem);rem=0; } }); }
+  db.transactions.push({id:'tx'+Date.now(),uid:UID,type:'retiro',amount,fee,net,mode:retMode,destino,desc:`⬇️ Retiro Bot · Com. 3%`,date:dtStr(),status:'pendiente'});
+  saveDB(db);showOk('okRet',`✅ Retiro de ${fmt(net)} USDT solicitado.`);
+  setTimeout(()=>{ closeM('mRet');render(); },3000);
+}
+
+// ── CAMBIAR PINs ──
+function cambiarPin(){
+  showErr('eCamPin','');showOk('okCamPin','');
+  const a=$('pinActual').value.trim(),n=$('pinNuevo').value.trim(),c=$('pinConfirm').value.trim();
+  if(!a||!n||!c){ showErr('eCamPin','Completa todos los campos'); return; }
+  if(n!==c){ showErr('eCamPin','Los PINs nuevos no coinciden'); return; }
+  if(n.length<4){ showErr('eCamPin','Mínimo 4 dígitos'); return; }
+  const db=loadDB(),u=db.users.find(u=>u.id===UID);
+  if(!u||u.pin!==a){ showErr('eCamPin','PIN actual incorrecto'); return; }
+  u.pin=n;saveDB(db);showOk('okCamPin','✅ PIN de acceso cambiado');
+  $('pinActual').value='';$('pinNuevo').value='';$('pinConfirm').value='';
+}
+function cambiarWpin(){
+  showErr('eCamWpin','');showOk('okCamWpin','');
+  const a=$('wpinActual').value.trim(),n=$('wpinNuevo').value.trim(),c=$('wpinConfirm').value.trim();
+  if(!a||!n||!c){ showErr('eCamWpin','Completa todos los campos'); return; }
+  if(n!==c){ showErr('eCamWpin','Los PINs nuevos no coinciden'); return; }
+  if(n.length<4){ showErr('eCamWpin','Mínimo 4 dígitos'); return; }
+  const db=loadDB(),u=db.users.find(u=>u.id===UID);
+  if(!u||u.wpin!==a){ showErr('eCamWpin','PIN de retiro actual incorrecto'); return; }
+  u.wpin=n;saveDB(db);showOk('okCamWpin','✅ PIN de retiro cambiado');
+  $('wpinActual').value='';$('wpinNuevo').value='';$('wpinConfirm').value='';
+}
+
+// ── CHAT ──
+function sendChat(){
+  const msg=$('chatMsg').value.trim();
+  if(!msg){ alert('Escribe tu mensaje'); return; }
+  const db=loadDB(),me=db.users.find(u=>u.id===UID);
+  (db.supportMsgs=db.supportMsgs||[]).push({uid:UID,name:me?.name||'?',msg,date:dtStr(),read:false});
+  saveDB(db);showOk('okChat','✅ Mensaje enviado al equipo.');$('chatMsg').value='';
+}
+
+// ── ADMIN ──
+let taps=0,tapTmr;
+$('logoIcon').addEventListener('click',()=>{
+  taps++;clearTimeout(tapTmr);tapTmr=setTimeout(()=>taps=0,2000);
+  if(taps>=5){ taps=0;$('mAdminPin').classList.add('on');$('adminPinIn').value='';showErr('eAdminPin',''); }
+});
+function checkAdminPin(){
+  const pin=$('adminPinIn').value.trim();
+  const db=loadDB();
+  if(pin!==(db.config.adminPin||DEFAULT_PIN)){ showErr('eAdminPin','PIN incorrecto'); return; }
+  closeM('mAdminPin');
+  $('cfgPin').value=db.config.adminPin||DEFAULT_PIN;$('cfgFrase').value=db.config.frase||'';
+  $('mAdmin').classList.add('on');renderAdmin(); updateV9Stats();
+}
+function atab(name,el){ document.querySelectorAll('.ad-sec').forEach(e=>e.style.display='none');document.querySelectorAll('.atab').forEach(e=>e.classList.remove('on'));$('ad-'+name).style.display='block';el.classList.add('on');renderAdmin(); updateV9Stats();if(name==='gan')populateGanOps(); }
+
+// ── BOT OPS ──
+function addOp(){
+  const strategy=$('adStrategy').value;
+  const entry=parseFloat($('adEntry').value),tp=parseFloat($('adTp').value),tpPct=parseFloat($('adTpPct').value);
+  const capUsado=parseFloat($('adCapUsado').value||0);
+  const openDate=$('adOpenDate').value||dateStr(),openTime=$('adOpenTime').value;
+  const status=$('adOpStatus').value;
+  const closeDate=$('adCloseDate')?.value||'',closeTime=$('adCloseTime')?.value||'';
+  if(!entry||!tp||isNaN(tpPct)){ alert('Completa entry, TP y TP%'); return; }
+  
+  const db=loadDB();
+  
+  // Validación idempotente: no agregar si ya existe una op con los mismos datos en los últimos 5 segundos
+  const ahora=Date.now();
+  const opDuplicada=db.botOps.find(o=>
+    o.strategy===strategy && 
+    o.entry===entry && 
+    o.tp===tp && 
+    o.tpPct===tpPct && 
+    o.openDate===openDate &&
+    parseInt(o.id.replace('op',''))>(ahora-5000)
+  );
+  
+  if(opDuplicada){ 
+    alert('⚠️ Esta operación ya fue registrada hace poco. Evita duplicados.'); 
+    return; 
+  }
+  
+  db.botOps.push({id:'op'+ahora,strategy,entry,tp,tpPct,capUsado,capPct:capUsado,openDate,openTime,closeDate,closeTime,status,date:openDate});
+  saveDB(db);
+  showOk('okOp','✅ Operación registrada');
+  $('adEntry').value='';$('adTp').value='';$('adTpPct').value='';$('adCapUsado').value='';$('adOpenTime').value='';$('adOpenDate').value='';
+  if(UID) render();renderAdmin(); updateV9Stats();
+}
+
+// ── Poblar selector de ops abiertas en PnL ──
+function populateGanOps(){
+  const db=loadDB();
+  const sel=$('adGanStrategy');
+  if(!sel) return;
+  const abiertas=db.botOps.filter(o=>o.status==='open'&&!o._deleted);
+  sel.innerHTML='<option value="">-- Selecciona op abierta --</option>'+
+    abiertas.map(o=>`<option value="${o.id}">${o.strategy} · $${o.entry}→$${o.tp} · Cap:${fmt(o.capUsado||0)} · ${o.openDate} ${o.openTime||''}</option>`).join('');
+  if(abiertas.length===0) sel.innerHTML='<option value="">-- No hay ops abiertas --</option>';
+}
+function precargarCapOp(opId){
+  const db=loadDB();
+  const op=db.botOps.find(o=>o.id===opId);
+  const hint=$('adGanStrategyHint');
+  if(op&&hint){
+    hint.textContent=`📊 ${op.strategy} · Entry $${op.entry} · TP $${op.tp} · +${op.tpPct}% · Cap usado: ${fmt(op.capUsado||0)}`;
+    if(!$('adPct').value) $('adPct').value=op.tpPct||'';
+  } else if(hint){ hint.textContent=''; }
+}
+
+// ── CERRAR OPERACIÓN (sin distribuir ganancia — la ganancia se registra al final del día con PnL Diario) ──
+function applyGanancia(){
+  const opId=$('adGanStrategy').value;
+  const pct=parseFloat($('adPct').value);
+  const note=$('adNote').value.trim()||'Op. cerrada';
+  if(!opId){ alert('Selecciona una operación abierta'); return; }
+  if(isNaN(pct)||pct<0||pct>5){ alert('% entre 0 y 5'); return; }
+  const db=loadDB(),hoy=dateStr();
+
+  const opRef=db.botOps.find(o=>o.id===opId&&o.status==='open');
+  if(!opRef){ alert('Operación no encontrada o ya cerrada. Recarga el panel.'); return; }
+  const strategy=opRef.strategy;
+  const capUsado=parseFloat(opRef.capUsado||0);
+  if(capUsado<=0){ alert('Esta operación no tiene Capital Usado definido.'); return; }
+
+  const ganBrutaOp=r2(capUsado*pct/100);
+
+  // Registrar en historial del día (solo referencia, SIN crear transacciones de ganancia)
+  let dayBlock=db.ganancias.find(g=>g.dateKey===hoy);
+  if(!dayBlock){ dayBlock={dateKey:hoy,dateStr:todayLabel(),ops:[]};db.ganancias.push(dayBlock); }
+  dayBlock.ops.push({strategy,pct,note,capUsado,ganBruta:ganBrutaOp,ts:dtStr()});
+
+  // Solo cerrar la op — las ganancias se distribuyen al final del día con "Registrar PnL Diario"
+  opRef.status='closed';
+  opRef.closeDate=hoy;
+  opRef.closeTime=new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+
+  saveDB(db);
+  showOk('okGan',`✅ ${strategy} cerrada · +${pct}% · Bruto acumulado al día: ${fmt(ganBrutaOp)}. Recuerda usar "Registrar PnL Diario" al final del día para distribuir las ganancias.`);
+  $('adPct').value='';$('adNote').value='';
+  $('adGanStrategy').value='';
+  if($('adGanStrategyHint')) $('adGanStrategyHint').textContent='';
+  if(UID) render();renderAdmin(); updateV9Stats();populateGanOps();
+}
+
+// ── PnL DIARIO DIRECTO ──
+function calcPnlDiaPreview(){
+  const pct=parseFloat($('pnlDiaPct').value||0);
+  const el=$('pnlDiaPreview');
+  if(!pct||pct<=0){ el.style.display='none'; return; }
+  const db=loadDB();
+  const poolTotal=r2(db.investments.filter(i=>i.status==='active').reduce((s,i)=>s+i.amount,0));
+  if(poolTotal<=0){ el.innerHTML='⚠️ No hay capital activo en el pool'; el.style.display='block'; return; }
+  const ganBruta=r2(poolTotal*pct/100);
+  const ganUsuarios50=r2(ganBruta*0.50);
+  const ganUsuarios75=r2(ganBruta*0.75);
+  const numUsers=new Set(db.investments.filter(i=>i.status==='active').map(i=>i.uid)).size;
+  el.innerHTML=`Pool total: <strong>${fmt(poolTotal)}</strong> × ${pct}% = <strong style="color:var(--gold)">${fmt(ganBruta)}</strong> bruto<br>`+
+    `Usuarios recibirían: <strong>${fmt(ganUsuarios50)}</strong> (sin ref) – <strong>${fmt(ganUsuarios75)}</strong> (con ref)<br>`+
+    `Inversores activos: <strong>${numUsers}</strong>`;
+  el.style.display='block';
+}
+
+function registrarPnlDiario(){
+  const pct=parseFloat($('pnlDiaPct').value||0);
+  const nota=$('pnlDiaNota').value.trim()||'PnL del día';
+  showOk('okPnlDia','');
+  if(!pct||pct<=0||pct>5){ alert('TP % debe ser entre 0 y 5'); return; }
+  const db=loadDB();
+  const hoy=dateStr();
+  let dayBlock=db.ganancias.find(g=>g.dateKey===hoy);
+  if(!dayBlock){ dayBlock={dateKey:hoy,dateStr:todayLabel(),ops:[]};db.ganancias.push(dayBlock); }
+
+  const poolTotal=r2(db.investments.filter(i=>i.status==='active').reduce((s,i)=>s+i.amount,0));
+  if(poolTotal<=0){ alert('No hay capital activo en el pool'); return; }
+  const ganBrutaPool=r2(poolTotal*pct/100);
+  dayBlock.ops.push({strategy:'PnL Diario',pct,note:nota,capUsado:poolTotal,ganBruta:ganBrutaPool,ts:dtStr(),esDiario:true});
+
+  // Registrar PnL diario en tabla pnlDiario (con pnlGlobal/pnlUsuario/uid para renderPnlDiario)
+  if(!db.pnlDiario) db.pnlDiario=[];
+
+  // Distribuir a cada inversor activo
+  let count=0;
+  const uidsVistos=new Set();
+  db.investments.filter(i=>i.status==='active').forEach(i=>{
+    const uid=i.uid;
+    if(uidsVistos.has(uid)) return;
+    uidsVistos.add(uid);
+    const refs=db.users.filter(u=>u.refBy===uid).length;
+    const ganPct=refs>0?0.75:0.50;
+    const {total:totalUsr}=calcBot(uid);
+    const ganBrutaUsr=r2(totalUsr*pct/100);
+    const ganNetaUsr=r2(ganBrutaUsr*ganPct);
+    if(ganNetaUsr>0){
+      count++;
+      db.pnlDiario.push({
+        id:'pnl'+Date.now()+uid, uid,
+        dateKey:hoy, dateStr:todayLabel(),
+        pct, nota,
+        pnlGlobal:ganBrutaPool,
+        pnlUsuario:ganNetaUsr,
+        ganBruta:ganBrutaPool,
+        ts:dtStr()
+      });
+      db.transactions.push({
+        id:'pd'+Date.now()+uid,uid,type:'ganancia',amount:ganNetaUsr,
+        desc:`💰 PnL Diario ${pct}% sobre tu capital ${fmt(totalUsr)} → ${fmt(ganNetaUsr)} netos (${Math.round(ganPct*100)}% tuyo) · ${nota}`,
+        date:dtStr(),dateKey:hoy,status:'completado',
+        ganData:{capBase:totalUsr,pct,ganBruta:ganBrutaUsr,ganUsr:ganNetaUsr,pctUsr:ganPct,esDiario:true}
+      });
+    }
+  });
+  saveDB(db);
+  showOk('okPnlDia',`✅ PnL ${pct}% registrado · Pool ${fmt(poolTotal)} · ${count} inversor(es) recibieron ganancia`);
+  $('pnlDiaPct').value='';$('pnlDiaNota').value='';
+  if($('pnlDiaPreview')) $('pnlDiaPreview').style.display='none';
+  if(UID) render();renderAdmin(); updateV9Stats();
+}
+
+// ── CATÁLOGO ACCIONES ──
+function guardarAccionCatalogo(){
+  showOk('okAccCat','');
+  const ticker=$('accTicker').value.trim().toUpperCase();
+  const nombre=$('accNombre').value.trim();
+  const logo=$('accLogo').value.trim();
+  const precio=parseFloat($('accPrecio').value);
+  const chg=parseFloat($('accChg').value||0);
+  const desc=$('accDesc').value.trim();
+  const divInfo=$('accDiv').value.trim();
+  if(!ticker||!nombre||isNaN(precio)){ alert('Ticker, nombre y precio son obligatorios'); return; }
+  const db=loadDB();
+  const idx=(db.stockCatalog||[]).findIndex(a=>a.ticker===ticker);
+  const acc={ticker,nombre,logo:logo||'📊',bg:'#0a1a0a',precio,chg,desc,divInfo};
+  if(idx>=0){ db.stockCatalog[idx]={...db.stockCatalog[idx],...acc}; }
+  else { (db.stockCatalog=db.stockCatalog||[]).push(acc); }
+  saveDB(db);showOk('okAccCat',`✅ ${ticker} guardado en el catálogo`);
+  $('accTicker').value='';$('accNombre').value='';$('accLogo').value='';$('accPrecio').value='';$('accChg').value='';$('accDesc').value='';$('accDiv').value='';
+  if(UID) renderStocks();renderAdmin(); updateV9Stats();
+}
+
+function abonarDividendo(){
+  const ticker=$('divTicker').value.trim().toUpperCase()||$('divTicker').value;
+  const porAcc=parseFloat($('divPorAccion').value);
+  const nota=$('divNota').value.trim()||'Dividendo';
+  if(!porAcc||porAcc<=0){ alert('Ingresa el dividendo por acción'); return; }
+  const db=loadDB();
+  let count=0;
+  (db.stockPositions||[]).filter(p=>p.ticker===ticker&&p.estado==='active').forEach(p=>{
+    const monto=r2(p.cantidad*porAcc);
+    db.transactions.push({id:'div'+Date.now()+p.uid,uid:p.uid,type:'dividendo',amount:monto,desc:`💰 ${nota} · ${ticker} · $${porAcc}/acc × ${r4(p.cantidad)}`,date:dtStr(),dateKey:dateStr(),status:'completado'});
+    const u=db.users.find(u=>u.id===p.uid);
+    if(u?.refBy){ const b=r2(monto*REF_ACC_PCT);if(b>0) db.transactions.push({id:'rd'+Date.now()+u.refBy,uid:u.refBy,type:'dividendo',amount:b,desc:`🤝 Bono referido dividendo ${ticker}`,date:dtStr(),dateKey:dateStr(),status:'completado'}); }
+    count++;
+  });
+  saveDB(db);showOk('okDiv',`✅ Dividendo abonado a ${count} inversores de ${ticker}`);
+  $('divPorAccion').value='';$('divNota').value='';
+  if(UID) render();renderAdmin(); updateV9Stats();
+}
+
+// ── NOTICIAS ADMIN ──
+function agregarNoticia(){
+  showOk('okNews','');
+  const fuente=$('newsFuente').value.trim(),titulo=$('newsTitulo').value.trim();
+  const resumen=$('newsResumen').value.trim(),cat=$('newsCat').value.trim();
+  if(!titulo||!resumen){ alert('Título y resumen son obligatorios'); return; }
+  const db=loadDB();
+  (db.noticias=db.noticias||[]).push({fuente:fuente||'Equipo SGH',titulo,resumen,cat:cat||'Cripto',dateKey:dateStr(),date:dtStr()});
+  saveDB(db);showOk('okNews','✅ Noticia publicada');
+  $('newsFuente').value='';$('newsTitulo').value='';$('newsResumen').value='';$('newsCat').value='';
+  renderAdmin(); updateV9Stats();
+}
+
+// ── CONFIRMAR COMPRA ACCIÓN (ADMIN) ──
+function confirmarCompraAdmin(txId,precioReal){
+  const db=loadDB();
+  const t=db.transactions.find(t=>t.id===txId);
+  if(!t||!t.accData) return;
+  // Protección idempotente: no confirmar si ya está completado
+  if(t.status==='completado'){ alert('Esta compra ya fue confirmada anteriormente.'); return; }
+  const d=t.accData;
+  const price=parseFloat(precioReal)||d.precioCompra||0;
+  const comAcc=r4(d.cantidadBruta*COM_ACC_PCT);
+  const accionesNetas=r4(d.cantidadBruta-comAcc);
+  (db.stockPositions=db.stockPositions||[]).push({
+    id:'pos'+Date.now(),uid:t.uid,
+    ticker:d.ticker,nombre:d.nombre,
+    cantidad:accionesNetas,precioCompra:price,
+    comAcciones:comAcc,
+    fechaCompra:d.fechaCompra||dateStr(),horaCompra:d.horaCompra||'--',
+    estado:'active'
+  });
+  t.status='completado';
+  // Bono referidor 2% en acciones (registrado como notificación)
+  const u=db.users.find(u=>u.id===t.uid);
+  if(u?.refBy){
+    const bonusAcc=r4(accionesNetas*REF_ACC_PCT);
+    db.transactions.push({id:'rb'+Date.now(),uid:u.refBy,type:'dividendo',amount:r2(bonusAcc*price),desc:`🤝 Bono referido compra ${d.ticker} (2% de ${accionesNetas.toFixed(4)} acc = ${bonusAcc.toFixed(4)} acc)`,date:dtStr(),dateKey:dateStr(),status:'completado'});
+  }
+  saveDB(db);renderAdmin(); updateV9Stats();if(UID)render();
+}
+
+function confirmarVentaAdmin(txId){
+  const db=loadDB();
+  const t=db.transactions.find(t=>t.id===txId);
+  if(!t||!t.accData) return;
+  // Protección idempotente: no confirmar si ya está completado
+  if(t.status==='completado'){ alert('Esta venta ya fue confirmada anteriormente.'); return; }
+  const d=t.accData;
+  const pos=(db.stockPositions||[]).find(p=>p.id===d.posId);
+  if(pos){ if(d.cantidad>=pos.cantidad){ pos.estado='sold';pos.precioVenta=d.precioVenta;pos.fechaVenta=d.fechaVenta||dateStr();pos.horaVenta=d.horaVenta||'--'; } else { pos.cantidad=r4(pos.cantidad-d.cantidad); } }
+  t.status='completado';
+  saveDB(db);renderAdmin(); updateV9Stats();if(UID)render();
+}
+
+function rechazarAccion(txId){ const db=loadDB(),t=db.transactions.find(t=>t.id===txId);if(t){ t.status='rechazado';saveDB(db);renderAdmin(); updateV9Stats(); } }
+function closeOpAdmin(id){ const db=loadDB(),op=db.botOps.find(o=>o.id===id&&o.status==='open'&&!o._deleted);if(op){ op.status='closed';op.closeTime=new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});op.closeDate=dateStr();saveDB(db);renderAdmin();updateV9Stats();if(UID)render(); } }
+function delOp(id){ 
+  if(!confirm('¿Eliminar esta operación?')) return;
+  const db=loadDB();
+  // Marcar como eliminada (no borrar) para que el merge de Firebase no la restaure
+  const op=db.botOps.find(o=>o.id===id);
+  if(op){ op._deleted=true; op.status='deleted'; }
+  saveDB(db);
+  renderAdmin(); updateV9Stats();
+  if(UID)render(); 
+}
+function confirmDep(txId,uid,amount){
+  const db=loadDB(),t=db.transactions.find(t=>t.id===txId);
+  if(!t) return;
+  // Protección idempotente: no confirmar si ya está completado
+  if(t.status==='completado'){ alert('Este depósito ya fue confirmado anteriormente.'); return; }
+  t.status='completado';
+  if(!t.esMembresia){
+    // Verificar que no exista ya una inversión vinculada a esta transacción
+    const yaExiste=db.investments.find(i=>i.txId===txId);
+    if(!yaExiste){
+      db.investments.push({id:'i'+Date.now(),txId,uid,amount:parseFloat(amount),date:dateStr(),status:'active'});
+    }
+  }
+  // Resolver referidos PENDIENTES al confirmar el primer depósito del usuario
+  const usuario=db.users.find(u=>u.id===uid);
+  if(usuario && usuario.refBy && typeof usuario.refBy==='string' && usuario.refBy.startsWith('PENDIENTE:')) {
+    const codigoPendiente=usuario.refBy.replace('PENDIENTE:','');
+    const referidor=db.users.find(u=>u.refCode===codigoPendiente);
+    if(referidor){
+      usuario.refBy=referidor.id;
+    } else {
+      console.warn('Referido no encontrado:', codigoPendiente);
+    }
+  }
+  saveDB(db);
+  renderAdmin(); updateV9Stats(); if(UID) render();
+}
+function updateRet(id,status){ const db=loadDB(),t=db.transactions.find(t=>t.id===id);if(t){ t.status=status;saveDB(db);renderAdmin(); updateV9Stats();render(); } }
+function addTrade(){ const url=$('tradeUrl').value.trim(),desc=$('tradeDesc').value.trim();if(!url){ alert('URL requerida'); return; }const db=loadDB();(db.trades=db.trades||[]).push({url,desc:desc||'Trade Binance',date:dtStr()});saveDB(db);showOk('okTrade','✅ Captura agregada');$('tradeUrl').value='';$('tradeDesc').value='';renderAdmin(); updateV9Stats();if(UID)render(); }
+function delTrade(idx){ const db=loadDB();db.trades.splice(idx,1);saveDB(db);renderAdmin(); updateV9Stats();if(UID)render(); }
+function markMsgRead(idx){ const db=loadDB();const msgs=(db.supportMsgs||[]).slice().reverse();msgs[idx].read=true;saveDB(db);renderAdmin(); updateV9Stats(); }
+function saveConfig(){ showOk('okCfg','');const pin=$('cfgPin').value.trim(),frase=$('cfgFrase').value.trim();if(!pin||pin.length<4){ alert('PIN mínimo 4 dígitos'); return; }const db=loadDB();db.config.adminPin=pin;db.config.frase=frase;db.config.fraseDate=dateStr();saveDB(db);showOk('okCfg','✅ Guardado');setFrase(); }
+
+// ── RESOLVER REFERIDOS PENDIENTES (función admin) ──
+function resolverRefsPendientes(){
+  const db=loadDB();
+  let resueltos=0, sinResolver=0;
+  db.users.forEach(u=>{
+    if(u.refBy && typeof u.refBy==='string' && u.refBy.startsWith('PENDIENTE:')){
+      const codigo=u.refBy.replace('PENDIENTE:','');
+      const referidor=db.users.find(r=>r.refCode===codigo);
+      if(referidor){ u.refBy=referidor.id; resueltos++; }
+      else sinResolver++;
+    }
+  });
+  saveDB(db);
+  const msg=`✅ Referidos resueltos: ${resueltos}. Sin resolver (código no encontrado): ${sinResolver}.`;
+  alert(msg);
+  renderAdmin(); updateV9Stats();
+}
+
+function renderAdmin(){
+  window._SGH_renderAdmin = renderAdmin;
+  const db=loadDB();
+  const allInv=r2(db.investments.filter(i=>i.status==='active').reduce((s,i)=>s+i.amount,0));
+  const allGan=r2(db.transactions.filter(t=>t.type==='ganancia'&&t.amount>0).reduce((s,t)=>s+t.amount,0));
+  const depPend=db.transactions.filter(t=>t.type==='deposito'&&t.status==='pendiente').length;
+  const retPend=db.transactions.filter(t=>t.type==='retiro'&&t.status==='pendiente').length;
+  const msgs=(db.supportMsgs||[]).filter(m=>!m.read).length;
+  const cat=db.stockCatalog||[];
+  const accCap=r2((db.stockPositions||[]).filter(p=>p.estado==='active').reduce((s,p)=>{ const ac=cat.find(a=>a.ticker===p.ticker)||{};return s+r2(p.cantidad*(ac.precio||p.precioCompra)); },0));
+
+  const refsPend=db.users.filter(u=>u.refBy&&typeof u.refBy==='string'&&u.refBy.startsWith('PENDIENTE:')).length;
+  const es=[['adTotalUsers',db.users.length],['adCapBot',fmt(allInv)],['adCapAcc',fmt(accCap)],['adGanTotal',fmt(allGan)],['adDepPend',depPend],['adRetPend',retPend],['adMsgCount',msgs],['adRefsPend',refsPend]];
+  es.forEach(([id,v])=>{ const e=$(id);if(e) e.textContent=v; });
+
+  // Ops hoy admin
+  const opEl=$('adOpsList');
+  if(opEl){
+    // Admin ve todas las abiertas + cerradas de hoy
+    const hoyOps=db.botOps.filter(o=>!o._deleted && o.status!=='deleted' && (o.status==='open' || o.date===dateStr() || o.closeDate===dateStr())).slice().reverse();
+    opEl.innerHTML=hoyOps.length?hoyOps.map(op=>`
+      <div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:0.55rem;margin-bottom:0.35rem">
+        <div style="display:flex;justify-content:space-between;margin-bottom:0.22rem">
+          <strong style="font-size:0.73rem;color:var(--blue)">${op.strategy}</strong>
+          <span style="font-size:0.58rem;padding:0.1rem 0.35rem;border-radius:20px;${op.status==='open'?'background:var(--greend);color:var(--green)':'background:var(--goldd);color:var(--gold)'}">
+            ${op.status==='open'?'🟢 Abierta':'✅ Cerrada'}
+          </span>
+        </div>
+        <div style="font-size:0.63rem;color:var(--muted)">Entry: <strong style="color:var(--gold)">$${op.entry}</strong> · TP: <strong style="color:var(--green)">$${op.tp}</strong> · +${op.tpPct}% · Cap: ${fmt(op.capUsado||0)}</div>
+        <div style="font-size:0.58rem;color:var(--muted);margin-top:0.12rem">🕐 ${op.openDate} ${op.openTime||'--'} ${op.status==='closed'?'→ '+op.closeDate+' '+op.closeTime:''}</div>
+        <div style="display:flex;gap:0.28rem;margin-top:0.32rem">
+          ${op.status==='open'?`<button class="btn sm green" style="flex:1" onclick="closeOpAdmin('${op.id}')">✅ Cerrar</button>`:`<span style="font-size:0.63rem;color:var(--green);padding:0.3rem 0.5rem;flex:1;text-align:center">✅ Cerrada</span>`}
+          <button class="btn sm red" style="flex:1" onclick="delOp('${op.id}')">🗑</button>
+        </div>
+      </div>`).join(''):'<div class="empty" style="padding:0.38rem">Sin ops hoy</div>';
+  }
+
+  // PnL historial
+  const gh=$('ganHist');
+  if(gh){
+    const hoy=dateStr();
+    gh.innerHTML=(db.ganancias||[]).slice().reverse().slice(0,5).map(g=>{
+      const t=r2((g.ops||[]).reduce((s,o)=>s+parseFloat(o.pct||0),0));
+      return `<div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:0.52rem;margin-bottom:0.32rem">
+        <div style="display:flex;justify-content:space-between"><span style="font-size:0.72rem;font-weight:700">${g.dateKey===hoy?'Hoy':g.dateStr}</span><span style="font-size:0.73rem;font-weight:800;color:var(--green)">+${t.toFixed(2)}%</span></div>
+        ${(g.ops||[]).map(o=>`<div style="font-size:0.62rem;color:var(--muted)">${o.strategy}: +${o.pct}% · ${o.note}</div>`).join('')}
+      </div>`;
+    }).join('')||'<div class="empty" style="padding:0.38rem">Sin registros</div>';
+  }
+
+  // Precios acciones para actualizar manualmente
+  const accPEl=$('accPreciosList');
+  if(accPEl){
+    accPEl.innerHTML=cat.map((a,i)=>`
+      <div style="display:flex;align-items:center;gap:0.38rem;margin-bottom:0.35rem;background:var(--card2);border-radius:9px;padding:0.5rem 0.65rem">
+        <span style="font-size:0.88rem">${a.logo||'📊'}</span>
+        <span style="flex:1;font-size:0.73rem;font-weight:700">${a.ticker}</span>
+        <input type="number" value="${a.precio||0}" step="0.01" style="width:85px;padding:0.3rem 0.5rem;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:0.72rem;font-family:'Nunito',sans-serif;outline:none" id="ap_${a.ticker}" placeholder="Precio">
+        <input type="number" value="${a.chg||0}" step="0.01" style="width:60px;padding:0.3rem 0.5rem;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:0.72rem;font-family:'Nunito',sans-serif;outline:none" id="ac_${a.ticker}" placeholder="%">
+        <button class="btn sm green" style="padding:0.28rem 0.55rem" onclick="updateAccPrice('${a.ticker}')">✅</button>
+      </div>`).join('')||'<div class="empty" style="padding:0.38rem">Sin acciones en catálogo</div>';
+  }
+
+  // Solicitudes compra acciones
+  const cEl=$('pendAccCompras');
+  if(cEl){
+    const pend=db.transactions.filter(t=>t.type==='accion_compra'&&t.status==='pendiente').map(t=>({...t,userName:db.users.find(u=>u.id===t.uid)?.name||'?'})).reverse();
+    cEl.innerHTML=pend.length?pend.map(t=>{
+      const d=t.accData||{};
+      const ac=cat.find(a=>a.ticker===d.ticker)||{};
+      return `<div style="background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:0.65rem;margin-bottom:0.38rem">
+        <div style="display:flex;justify-content:space-between;margin-bottom:0.25rem"><strong>${t.userName}</strong><span class="badge pending">Pendiente</span></div>
+        <div style="font-size:0.67rem;color:var(--gold)">${d.cantidadBruta} ${d.ticker} a $${parseFloat(d.precioCompra||0).toFixed(2)}</div>
+        <div style="font-size:0.65rem;color:var(--green)">Precio real ahora: <strong>$${parseFloat(ac.precio||d.precioCompra||0).toFixed(2)}</strong></div>
+        <div style="font-size:0.65rem;color:var(--green)">Recibirá: <strong>${r4(d.accionesNetas||0).toFixed(4)} acciones netas</strong></div>
+        <div style="font-size:0.62rem;color:var(--muted)">📅 ${d.fechaCompra||''} ${d.horaCompra||''} · Total: ${fmt(d.total||0)}</div>
+        <div style="display:flex;gap:0.3rem;margin-top:0.38rem">
+          <button class="btn sm green" style="flex:2" onclick="confirmarCompraAdmin('${t.id}','${ac.precio||d.precioCompra}')">✅ Confirmar</button>
+          <button class="btn sm red" style="flex:1" onclick="rechazarAccion('${t.id}')">❌</button>
+        </div>
+      </div>`;
+    }).join(''):'<div class="empty" style="padding:0.38rem">Sin solicitudes</div>';
+  }
+
+  // Solicitudes venta
+  const vEl=$('pendAccVentas');
+  if(vEl){
+    const pend=db.transactions.filter(t=>t.type==='accion_venta'&&t.status==='pendiente').map(t=>({...t,userName:db.users.find(u=>u.id===t.uid)?.name||'?'})).reverse();
+    vEl.innerHTML=pend.length?pend.map(t=>{
+      const d=t.accData||{};
+      return `<div style="background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:0.65rem;margin-bottom:0.38rem">
+        <div style="display:flex;justify-content:space-between;margin-bottom:0.25rem"><strong>${t.userName}</strong><span class="badge pending">Pendiente</span></div>
+        <div style="font-size:0.67rem;color:var(--red)">${d.cantidad} ${d.ticker} a $${parseFloat(d.precioVenta||0).toFixed(2)}</div>
+        <div style="font-size:0.65rem;color:var(--green)">Neto a enviar: <strong>${fmt(d.neto||0)}</strong> (imp: ${fmt(d.impuesto||0)})</div>
+        <div style="font-size:0.65rem;color:var(--gold);word-break:break-all">📬 ${d.destino||''}</div>
+        <div style="font-size:0.62rem;color:var(--muted)">📅 ${d.fechaVenta||''} ${d.horaVenta||''}</div>
+        <div style="display:flex;gap:0.3rem;margin-top:0.38rem">
+          <button class="btn sm green" style="flex:2" onclick="confirmarVentaAdmin('${t.id}')">✅ Confirmar</button>
+          <button class="btn sm red" style="flex:1" onclick="rechazarAccion('${t.id}')">❌</button>
+        </div>
+      </div>`;
+    }).join(''):'<div class="empty" style="padding:0.38rem">Sin solicitudes</div>';
+  }
+
+  // Depósitos bot
+  const dEl=$('pendDeps');
+  if(dEl){
+    const pend=db.transactions.filter(t=>t.type==='deposito'&&t.status==='pendiente').map(t=>({...t,userName:db.users.find(u=>u.id===t.uid)?.name||'?'})).reverse();
+    dEl.innerHTML=pend.length?pend.map(t=>`
+      <div style="background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:0.65rem;margin-bottom:0.38rem">
+        <div style="display:flex;justify-content:space-between;margin-bottom:0.25rem"><strong>${t.userName}</strong><span class="badge pending">Pendiente</span></div>
+        <div style="font-size:0.67rem;color:${t.esMembresia?'var(--purple)':'var(--gold)'}">${t.esMembresia?'🎓 Membresía:':''} ${fmt(t.amount)} USDT · ${t.date}</div>
+        <button class="btn sm green" style="margin-top:0.35rem;width:100%" onclick="confirmDep('${t.id}','${t.uid}','${t.invAmount||t.amount}')">✅ Confirmar${t.esMembresia?' membresía':' → activar saldo'}</button>
+      </div>`).join(''):'<div class="empty">Sin depósitos pendientes</div>';
+  }
+
+  // Retiros bot
+  const rEl=$('pendRets');
+  if(rEl){
+    const pend=db.transactions.filter(t=>t.type==='retiro'&&t.status==='pendiente').map(t=>({...t,userName:db.users.find(u=>u.id===t.uid)?.name||'?'})).reverse();
+    rEl.innerHTML=pend.length?pend.map(t=>`
+      <div style="background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:0.65rem;margin-bottom:0.38rem">
+        <div style="display:flex;justify-content:space-between;margin-bottom:0.25rem"><strong>${t.userName}</strong><span class="badge pending">Pendiente</span></div>
+        <div style="font-size:0.67rem;color:var(--green)">Enviar: <strong>${fmt(t.net)}</strong></div>
+        <div style="font-size:0.65rem;color:var(--gold);word-break:break-all;margin:0.15rem 0">📬 ${t.destino}</div>
+        <div style="display:flex;gap:0.3rem;margin-top:0.35rem">
+          <button class="btn sm green" style="flex:1" onclick="updateRet('${t.id}','completado')">✅ Enviado</button>
+          <button class="btn sm blue" style="flex:1" onclick="updateRet('${t.id}','procesando')">🔄 Proceso</button>
+        </div>
+      </div>`).join(''):'<div class="empty">Sin retiros pendientes</div>';
+  }
+
+  // Usuarios
+  const uEl=$('userList');
+  if(uEl){
+    uEl.innerHTML=db.users.length?db.users.map(u=>{
+      const inv=r2(db.investments.filter(i=>i.uid===u.id&&i.status==='active').reduce((s,i)=>s+i.amount,0));
+      const gan=r2(db.transactions.filter(t=>t.uid===u.id&&t.type==='ganancia'&&t.amount>0).reduce((s,t)=>s+t.amount,0));
+      const accV=r2((db.stockPositions||[]).filter(p=>p.uid===u.id&&p.estado==='active').reduce((s,p)=>{ const ac=cat.find(a=>a.ticker===p.ticker)||{};return s+r2(p.cantidad*(ac.precio||p.precioCompra)); },0));
+      const refs=db.users.filter(r=>r.refBy===u.id).length;
+      const refsPend=db.users.filter(r=>r.refBy && typeof r.refBy==='string' && r.refBy.startsWith('PENDIENTE:') && r.refBy.includes(u.refCode)).length;
+      const refByName=u.refBy?(u.refBy.startsWith('PENDIENTE:')?'⏳ Pend:'+u.refBy.replace('PENDIENTE:',''):(db.users.find(r=>r.id===u.refBy)?.name||'?')):'—';
+      return `<div style="background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:0.62rem;margin-bottom:0.35rem;display:flex;align-items:center;gap:0.45rem">
+        <div style="flex:1"><div style="font-size:0.78rem;font-weight:700">${u.name}</div><div style="font-size:0.57rem;color:var(--muted)">${u.phone} · ${u.email||''} · ${refs} refs · ${u.created}</div><div style="font-size:0.55rem;color:var(--muted)">Ref por: <span style="color:${u.refBy&&u.refBy.startsWith('PENDIENTE:')?'var(--gold)':'var(--blue)'}">${refByName}</span></div></div>
+        <div style="text-align:right"><div style="font-size:0.8rem;font-weight:800;color:var(--green)">${fmt(r2(inv+gan))}</div><div style="font-size:0.57rem;color:var(--blue)">Acc: ${fmt(accV)}</div></div>
+      </div>`;
+    }).join(''):'<div class="empty">Sin usuarios</div>';
+  }
+
+  // Trades
+  const tEl=$('adTradesList');
+  if(tEl){ const tr=db.trades||[];tEl.innerHTML=tr.length?tr.slice().reverse().map((t,i)=>`<div style="background:var(--card2);border:1px solid var(--border);border-radius:9px;padding:0.52rem;margin-bottom:0.32rem"><div style="font-size:0.7rem;font-weight:700">${t.desc}</div><div style="font-size:0.58rem;color:var(--muted)">${t.date}</div><button class="btn sm red" style="margin-top:0.25rem" onclick="delTrade(${tr.length-1-i})">🗑 Eliminar</button></div>`).join(''):'<div class="empty" style="padding:0.38rem">Sin capturas</div>'; }
+
+  // Mensajes soporte
+  const msEl=$('supportMsgs');
+  if(msEl){ const msgs=(db.supportMsgs||[]).slice().reverse();msEl.innerHTML=msgs.length?msgs.map((m,i)=>`<div style="background:var(--card2);border:1px solid ${m.read?'var(--border)':'rgba(212,168,67,0.3)'};border-radius:9px;padding:0.52rem;margin-bottom:0.32rem"><div style="display:flex;justify-content:space-between"><strong style="font-size:0.72rem">${m.name}</strong>${!m.read?'<span class="badge pending">Nuevo</span>':''}</div><div style="font-size:0.68rem;color:var(--muted);margin:0.12rem 0">${m.msg}</div><div style="font-size:0.58rem;color:var(--muted)">${m.date}</div>${!m.read?`<button class="btn sm" style="margin-top:0.25rem" onclick="markMsgRead(${msgs.length-1-i})">✅ Leído</button>`:''}</div>`).join(''):'<div class="empty" style="padding:0.38rem">Sin mensajes</div>'; }
+
+  // Noticias admin hoy
+  const anEl=$('adminNewsList');
+  if(anEl){ const nh=(db.noticias||[]).filter(n=>n.dateKey===dateStr()).slice().reverse();anEl.innerHTML=nh.length?nh.map((n,i)=>`<div style="background:var(--card2);border:1px solid var(--border);border-radius:9px;padding:0.52rem;margin-bottom:0.32rem"><div style="font-size:0.73rem;font-weight:700">${n.titulo}</div><div style="font-size:0.62rem;color:var(--muted)">${n.fuente} · #${n.cat} · ${n.date}</div><button class="btn sm red" style="margin-top:0.25rem" onclick="delNoticia(${nh.length-1-i})">🗑</button></div>`).join(''):'<div class="empty" style="padding:0.38rem">Sin noticias hoy</div>'; }
+}
+
+function updateAccPrice(ticker){
+  const precio=parseFloat(document.getElementById('ap_'+ticker)?.value||0);
+  const chg=parseFloat(document.getElementById('ac_'+ticker)?.value||0);
+  if(!precio) return;
+  const db=loadDB();
+  const ac=(db.stockCatalog||[]).find(a=>a.ticker===ticker);
+  if(ac){ ac.precio=r2(precio);ac.chg=r2(chg); saveDB(db); }
+  if(UID) renderStocks();renderAdmin(); updateV9Stats();
+}
+
+function delNoticia(idx){ const db=loadDB();const nh=(db.noticias||[]).filter(n=>n.dateKey===dateStr());const all=db.noticias||[];const i=all.indexOf(nh[idx]);if(i>=0) all.splice(i,1);saveDB(db);renderAdmin(); updateV9Stats(); }
+
+['mDep','mMemb','mRet','mAdmin','mAdminPin','mChat','mComprarAcc','mVenderAcc'].forEach(id=>{
+  const el=$(id);if(el) el.addEventListener('click',function(e){ if(e.target===this)this.classList.remove('on'); });
+});
+
+setInterval(()=>{ if(UID)render(); },60000);
+
+// ── FORZAR SINCRONIZACIÓN CON FIREBASE (función de emergencia) ──
+window.forceSyncFirebase = async function() {
+  if (!window._firebaseReady || typeof firebase === 'undefined') {
+    alert('Firebase no está disponible');
+    return;
+  }
+  try {
+    const _fs = firebase.firestore();
+    const snap = await _fs.collection('sgh').doc('maindb').get();
+    if (snap.exists) {
+      const remoteDb = snap.data()?.db;
+      if (remoteDb) {
+        // Firebase gana: reemplazar localStorage completamente con Firebase
+        try { localStorage.setItem('sgh_v11', JSON.stringify(remoteDb)); } catch(e) {}
+        alert('✅ Datos sincronizados desde Firebase');
+        if (UID) {
+          render();
+          renderAdmin();
+          updateV9Stats();
+        }
+      } else {
+        alert('⚠️ Base de datos remota vacía');
+      }
+    } else {
+      alert('⚠️ No hay datos en Firebase aún');
+    }
+  } catch(e) {
+    alert('❌ Error en sincronización: ' + e.message);
+    console.error(e);
+  }
+};
+
+</script>
+</body>
+</html>
